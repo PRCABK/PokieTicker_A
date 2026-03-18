@@ -1,211 +1,176 @@
-# PokieTicker — Understand the "Why" Behind Every Price Move
+# PokieTicker — A股智能分析平台
 
-**🔗 Live Demo: [mitrui.com/PokieTicker](https://mitrui.com/PokieTicker/)** | [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-yellow?logo=buymeacoffee)](https://buymeacoffee.com/mitrui)
-
-Since I wanted to understand the stories behind candlestick charts, I vibe coded this app.
-
-As a stock market beginner, the news was too fragmented and I was wasting a lot of time, never understanding why prices went up or down. I built PokieTicker to develop **event-driven thinking** — to understand the "why" behind every price move.
-
-<!-- Replace YOUR_TWEET_URL with your actual X post URL -->
-[![Watch Demo](docs/demo.gif)](YOUR_TWEET_URL)
-
-> Click to watch the full demo video
-
-## What It Does
-
-- **News on the chart** — Dots on the candlestick chart represent news for each date. Click any dot to see the news impacting that company at the time.
-- **Filter by impact type** — Market, earnings, product, policy, competition, or management. Click a category to see related bullish or bearish news.
-- **Find similar events** — Discover historical days with similar news patterns and see what happened to the stock afterward.
-- **AI explains price moves** — Select a date range and ask AI why the stock dropped or rallied. It tells you what events caused it.
-- **Predict trends** — Based on the past 30 days of news events, the model predicts how these events might affect future price direction.
+**新闻驱动的A股分析工具**：自动爬取个股新闻，AI 情感分析，机器学习预测走势。
 
 ![screenshot](docs/screenshot.png)
 
-## How the Prediction Works
+## 功能
 
-PokieTicker includes an XGBoost-based prediction system that combines news sentiment with technical indicators:
+- **K线图 + 新闻粒子** — 每个交易日下方的彩色圆点代表当日新闻，绿色=利好，红色=利空，点击查看详情
+- **新闻分类筛选** — 按市场影响、政策影响、财报业绩、产品技术、市场竞争、管理层变动分类过滤
+- **AI 趋势预测** — 基于近 7/30 天新闻情感 + 技术指标，XGBoost 模型预测 T+1/T+3/T+5 涨跌方向
+- **历史相似匹配** — 余弦相似度查找历史上相似的新闻模式，参考后续走势
+- **区间分析** — 选择日期范围，AI 解释为什么涨/跌
+- **AI 深度分析** — 单篇新闻的上涨/下跌因素分析（DeepSeek API）
+- **自动数据采集** — 搜索选中股票后自动爬取历史行情和新闻，训练模型时数据不足自动补充
 
-**Features (31 total):**
-- **News features** — article count, sentiment score, positive/negative ratio, 3/5/10-day rolling averages, sentiment momentum
-- **Technical features** — price returns (1/3/5/10-day), volatility, volume ratio, RSI-14, moving average crossover
-
-**How it works:**
-1. News articles are scored for sentiment by Claude Haiku (batch API) — each article gets a sentiment label, key discussion summary, and bullish/bearish reasons
-2. These are combined with OHLC price data into daily feature vectors
-3. XGBoost classifiers predict up/down direction at T+1, T+3, and T+5 horizons
-4. The system also finds historically similar periods (cosine similarity on feature vectors) and shows what happened next
-
-**Why news-driven prediction can work:**
-- Stock prices are driven by information. Major news events (earnings, policy changes, product launches) create predictable short-term momentum
-- Sentiment clustering matters — when multiple negative articles cluster on the same day, the downward pressure tends to persist for 1-3 days
-- Historical pattern matching works because markets react similarly to similar events (e.g., tariff announcements, FDA approvals, earnings beats)
-
-> This is an experimental tool for learning, not financial advice. Markets are complex and no model captures everything.
-
-## Architecture
+## 技术架构
 
 ```
-Frontend (React + Vite + D3.js)          Backend (FastAPI + SQLite)
-+---------------------------------+      +----------------------------+
-|  CandlestickChart (D3.js)       |      |  /api/stocks/{sym}/ohlc    |
-|  +- news dots on each date      |----->|  /api/news/{sym}?date=     |
-|  +- crosshair + click to lock   |      |  /api/news/{sym}/categories|
-|                                  |      |                            |
-|  NewsPanel (right sidebar)       |<-----|  SQLite: pokieticker.db    |
-|  +- sentiment sorted             |      |  +- ohlc (51K+ rows)      |
-|  +- up/down reasons              |      |  +- news_raw (61K+)       |
-|  +- T+1/T+5 returns              |      |  +- layer1_results (97K+) |
-|                                  |      |                            |
-|  PredictionPanel                 |<-----|  /api/predict/{sym}/forecast|
-|  +- 7-day & 30-day forecasts     |      |  +- XGBoost models         |
-|  +- similar historical periods   |      |  +- cosine similarity      |
-+---------------------------------+      +----------------------------+
+前端 (React + Vite + D3.js)                后端 (FastAPI + MySQL)
++----------------------------------+      +--------------------------------+
+|  CandlestickChart (D3.js K线图)  |      |  Tushare Pro  → OHLC 日线数据  |
+|  +- 新闻粒子叠加显示             |----->|  东方财富 API → 个股新闻       |
+|  +- 十字准线 + 点击锁定          |      |                                |
+|                                   |      |  Pipeline:                     |
+|  NewsPanel (新闻面板)             |<-----|  Layer0 规则过滤               |
+|  +- 情感排序                      |      |  Layer1 AI情感分析 (DeepSeek)  |
+|  +- 涨跌原因                      |      |  Layer2 深度分析 (按需)        |
+|                                   |      |                                |
+|  PredictionPanel (预测面板)       |<-----|  XGBoost 预测模型              |
+|  +- 7天 & 30天预测                |      |  +- 31维特征 (新闻+技术)       |
+|  +- 相似历史周期                  |      |  +- 余弦相似度匹配             |
++----------------------------------+      +--------------------------------+
 ```
 
-## Data Pipeline
+## 数据管道
 
 ```
-Polygon API --> Layer 0 (rule filter) --> Layer 1 (Haiku Batch API) --> Layer 2 (Sonnet, on-demand)
-  OHLC + News    reject spam/listicles    sentiment + up/down reasons     deep analysis on click
-                  ~17% rejected            50 articles per batch call      cached in DB
+搜索选中股票
+  ├── Tushare Pro → OHLC日线数据 → ohlc表
+  ├── 东方财富API → 个股新闻 → news_raw表
+  ├── 新闻对齐 → news_aligned表 (计算T+0/1/3/5/10收益率)
+  ├── Layer0 规则过滤 (去除垃圾/无关新闻)
+  ├── Layer1 AI分析 (情感、相关性、涨跌原因)
+  └── XGBoost模型自动训练 (数据充足时)
 ```
 
-## Quick Start
+## 快速开始
 
-The repo includes a pre-built database (`pokieticker.db`) with historical data, so you can run it immediately — **no API keys needed**.
+### 1. 环境准备
+
+- Python 3.10+
+- Node.js 18+
+- MySQL 8.0+
+
+### 2. 数据库初始化
 
 ```bash
-git clone https://github.com/owengetinfo-design/PokieTicker.git
-cd PokieTicker
+mysql -u root -p < init.sql
+```
 
-# Unpack the pre-built database and models
-gunzip -k pokieticker.db.gz
-tar xzf models.tar.gz -C backend/ml/
+### 3. 配置文件
 
-# Backend (Python 3.10+)
+```bash
+cp config.yml.example config.yml
+# 编辑 config.yml，填入你的 API 密钥
+```
+
+| 配置项 | 获取地址 | 费用 |
+|--------|----------|------|
+| Tushare Token | [tushare.pro](https://tushare.pro/register) | 免费 |
+| DeepSeek API Key | [platform.deepseek.com](https://platform.deepseek.com/) | 按量付费 |
+| MySQL | 本地安装 | 免费 |
+
+### 4. 安装依赖
+
+```bash
+# 后端
 python -m venv venv
 source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-# Frontend (Node.js 18+)
+# 前端
 cd frontend && npm install && cd ..
 ```
 
-Then start both services (in two terminal windows):
+### 5. 启动服务
 
 ```bash
-# Terminal 1: Backend
+# 终端1: 后端
 source venv/bin/activate
 uvicorn backend.api.main:app --reload
 
-# Terminal 2: Frontend
+# 终端2: 前端
 cd frontend && npm run dev
 ```
 
-Open **http://localhost:7777/PokieTicker/** and you're done.
+打开 **http://localhost:5173** 即可使用。
 
-> **Just want to see the demo?** Visit [mitrui.com/PokieTicker](https://mitrui.com/PokieTicker/) — no setup needed.
+## 使用流程
 
-### Updating data (optional)
+1. **搜索股票** — 输入代码或名称（如 `000001` 或 `平安银行`），选中后自动爬取数据
+2. **等待数据加载** — 首次选择需要几秒钟获取历史行情和新闻
+3. **查看K线图** — 鼠标悬停查看每日 OHLC，点击新闻圆点查看详情
+4. **训练模型** — 点击预测面板的"训练模型"按钮，数据不足时自动补充
+5. **AI分析** — 选择日期范围询问涨跌原因，或对单篇新闻进行深度分析
 
-If you want to fetch the latest stock data and run AI analysis, you'll need API keys:
+## 预测模型
 
-```bash
-cp .env.example .env
-# Edit .env and fill in your keys:
-```
+**特征工程 (31维)：**
+- **新闻特征** — 文章数、情感得分、正/负面比例、3/5/10日滚动均值、情感动量
+- **技术指标** — 收益率(1/3/5/10日)、波动率、量比、RSI-14、MA交叉
+- **市场情绪** — 全市场情感指标
 
-| Key | Where to get it | Cost |
-|-----|-----------------|------|
-| `POLYGON_API_KEY` | [polygon.io](https://polygon.io/) | Free tier |
-| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/) | Pay-as-you-go |
+**训练方式：**
+- 扩展窗口交叉验证（避免未来数据泄露）
+- 自动选择最优阈值
+- 支持 XGBoost 和 LSTM 两种模型
 
-```bash
-# Fetch new OHLC + news
-python -m backend.bulk_fetch
-
-# Run AI analysis
-python -m backend.batch_submit --top 50
-python -m backend.batch_collect <batch_id>
-```
-
-## Project Structure
+## 项目结构
 
 ```
-.env                          # API keys (gitignored)
-pokieticker.db                # SQLite database (gitignored)
-requirements.txt              # Python dependencies
+config.yml                        # 配置文件（API密钥，gitignored）
+init.sql                          # MySQL 建表脚本
+requirements.txt                  # Python 依赖
 
 backend/
-  config.py                   # pydantic-settings, loads .env
-  database.py                 # 9-table SQLite schema
-  bulk_fetch.py               # Bulk download OHLC + news for many tickers
-  batch_submit.py             # Submit Layer 1 to Anthropic Batch API
-  batch_collect.py            # Collect Batch API results
-  weekly_update.py            # Incremental weekly data update
-  polygon/
-    client.py                 # Polygon API with retry/backoff
+  config.py                       # pydantic-settings，加载 config.yml
+  database.py                     # MySQL 连接管理
+  tushare/
+    client.py                     # Tushare行情 + 东方财富新闻接口
+  sina/
+    crawler.py                    # 新浪财经爬虫（备用）
   pipeline/
-    layer0.py                 # Rule-based filter (free)
-    layer1.py                 # Claude Haiku batch analysis
-    layer2.py                 # Sonnet on-demand deep analysis
-    alignment.py              # News -> trading day + forward returns
-    similarity.py             # Similar news pattern matching
+    layer0.py                     # 规则过滤
+    layer1.py                     # AI情感分析（DeepSeek）
+    layer2.py                     # 深度分析（按需）
+    alignment.py                  # 新闻→交易日对齐 + 收益率计算
+    similarity.py                 # 相似模式匹配
   ml/
-    features.py               # 31-feature engineering (news + technical)
-    model.py                  # XGBoost training (per-ticker + unified)
-    inference.py              # Forecast generation + similar period analysis
-    backtest.py               # Backtesting framework
-    lstm_model.py             # Experimental LSTM model
+    features.py                   # 特征工程（31维）
+    model.py                      # XGBoost 训练与预测
+    inference.py                  # 预测生成 + 相似周期分析
+    lstm_model.py                 # LSTM 序列模型
   api/
-    main.py                   # FastAPI app + CORS
+    main.py                       # FastAPI 应用
     routers/
-      stocks.py               # GET /api/stocks, /search, /{sym}/ohlc
-      news.py                 # GET /api/news/{sym}, /{sym}/timeline
-      analysis.py             # POST /api/analysis/deep, /story
-      pipeline.py             # POST /api/pipeline/fetch, /process
-      predict.py              # GET /api/predict/{sym}/forecast
+      stocks.py                   # 股票搜索、OHLC数据
+      news.py                     # 新闻查询、分类、时间线
+      analysis.py                 # AI深度分析
+      pipeline.py                 # 数据抓取、处理、训练
+      predict.py                  # 预测接口
 
 frontend/
   src/
-    App.tsx                   # Main layout (chart + panels)
+    App.tsx                       # 主布局
     components/
-      CandlestickChart.tsx    # D3.js chart with news dots
-      NewsPanel.tsx           # Sentiment-sorted news cards
-      NewsCategoryPanel.tsx   # Filter by impact category
-      PredictionPanel.tsx     # AI forecast + similar periods
-      RangeQueryPopup.tsx     # "Why did it drop?" range analysis
-      SimilarDaysPanel.tsx    # Historical pattern matches
-      StockSelector.tsx       # Ticker search + tabs
+      CandlestickChart.tsx        # D3.js K线图 + 新闻粒子
+      NewsPanel.tsx               # 新闻面板
+      NewsCategoryPanel.tsx       # 分类筛选
+      PredictionPanel.tsx         # AI预测面板
+      RangeQueryPopup.tsx         # 区间分析弹窗
+      SimilarDaysPanel.tsx        # 相似日匹配
+      StockSelector.tsx           # 股票搜索
 ```
 
-## Weekly Update
+## 数据来源
 
-```bash
-# Fetch new OHLC + news since last update
-python -m backend.weekly_update
-
-# Run AI analysis on new articles
-python -m backend.batch_submit --top 50
-python -m backend.batch_collect <batch_id>
-```
-
-## Cost Summary
-
-| Item | Cost |
-|------|------|
-| Polygon data (free tier) | $0 |
-| Layer 1 Batch API (per 1000 articles) | ~$0.35 |
-| Layer 2 on-demand (per article) | ~$0.003 |
-| Weekly incremental update | ~$1-2 |
-
-## Tech Stack
-
-- **Frontend**: React, TypeScript, Vite, D3.js
-- **Backend**: FastAPI, SQLite (WAL mode), Pydantic
-- **AI**: Claude Haiku 4.5 (batch sentiment), Claude Sonnet (deep analysis)
-- **ML**: XGBoost (prediction), cosine similarity (pattern matching)
-- **Data**: Polygon.io REST API
+| 数据 | 来源 | 说明 |
+|------|------|------|
+| A股日线行情 | Tushare Pro | 免费，需注册获取 Token |
+| 个股新闻 | 东方财富 | 免费，无需 Token |
+| AI情感分析 | DeepSeek | OpenAI 兼容接口，按量付费 |
 
 ## License
 
