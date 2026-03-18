@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(python -c \":*)",
+      "Bash(python -c \"import py_compile; [py_compile.compile\\(f, doraise=True\\) for f in [''backend/ml/features.py'', ''backend/ml/lstm_model.py'', ''backend/sina/crawler.py'', ''backend/api/routers/pipeline.py'', ''backend/api/routers/stocks.py'', ''backend/pipeline/alignment.py'', ''backend/pipeline/layer2.py'']]\")",
+      "Bash(python:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}
