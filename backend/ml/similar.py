@@ -6,6 +6,10 @@ from backend.ml.features import build_features, FEATURE_COLS
 from backend.database import get_conn
 
 
+def _to_date_str(v) -> str:
+    return str(v)[:10] if v is not None else ""
+
+
 def find_similar_days(symbol: str, date: str, top_k: int = 10) -> dict:
     """Find days with the most similar feature vectors to the target date."""
     df = build_features(symbol)
@@ -71,7 +75,7 @@ def find_similar_days(symbol: str, date: str, top_k: int = 10) -> dict:
 
     news_by_date: dict[str, list[dict]] = {}
     for r in news_rows:
-        d = r["trade_date"]
+        d = _to_date_str(r["trade_date"])
         if d not in news_by_date:
             news_by_date[d] = []
         news_by_date[d].append({
@@ -79,16 +83,21 @@ def find_similar_days(symbol: str, date: str, top_k: int = 10) -> dict:
             "sentiment": r["sentiment"],
         })
 
-    close_by_date = {r["date"]: r["close"] for r in ohlc_rows}
-    ohlc_dates = [r["date"] for r in ohlc_rows]
+    close_by_date = {_to_date_str(r["date"]): float(r["close"]) for r in ohlc_rows}
+    ohlc_dates = [_to_date_str(r["date"]) for r in ohlc_rows]
+    ohlc_idx = {d: i for i, d in enumerate(ohlc_dates)}
 
     def get_forward_return(d: str, days: int) -> float | None:
-        if d not in ohlc_dates:
+        idx = ohlc_idx.get(d)
+        if idx is None:
             return None
-        idx = ohlc_dates.index(d)
         if idx + days >= len(ohlc_dates):
             return None
-        return (close_by_date[ohlc_dates[idx + days]] / close_by_date[d] - 1) * 100
+        base = close_by_date.get(d)
+        nxt = close_by_date.get(ohlc_dates[idx + days])
+        if base in (None, 0.0) or nxt is None:
+            return None
+        return (nxt / base - 1) * 100
 
     target_date_str = df.loc[target_idx, "date_str"]
     target_features = {col: round(float(target_row[col]), 4) for col in

@@ -18,6 +18,18 @@ from backend.database import get_conn
 MODEL = settings.deepseek_model
 
 
+def _to_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return "；".join(str(v) for v in value if v is not None)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
 def get_cached(news_id: str, symbol: str) -> Optional[Dict[str, Any]]:
     """Check if a deep analysis is already cached."""
     conn = get_conn()
@@ -57,6 +69,7 @@ def analyze_article(news_id: str, symbol: str) -> Dict[str, Any]:
     client = OpenAI(
         api_key=settings.deepseek_api_key,
         base_url=settings.deepseek_base_url,
+        timeout=90.0,
     )
 
     prompt = f"""你是一位资深金融分析师。请对以下新闻文章对 {symbol} 股票的影响进行深度分析。
@@ -88,6 +101,10 @@ def analyze_article(news_id: str, symbol: str) -> Dict[str, Any]:
     except json.JSONDecodeError:
         parsed = {"discussion": text, "growth_reasons": "", "decrease_reasons": ""}
 
+    discussion_text = _to_text(parsed.get("discussion", ""))
+    growth_text = _to_text(parsed.get("growth_reasons", ""))
+    decrease_text = _to_text(parsed.get("decrease_reasons", ""))
+
     # Cache result
     conn = get_conn()
     try:
@@ -102,9 +119,9 @@ def analyze_article(news_id: str, symbol: str) -> Dict[str, Any]:
                 (
                     news_id,
                     symbol,
-                    parsed.get("discussion", ""),
-                    parsed.get("growth_reasons", ""),
-                    parsed.get("decrease_reasons", ""),
+                    discussion_text,
+                    growth_text,
+                    decrease_text,
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
@@ -115,9 +132,9 @@ def analyze_article(news_id: str, symbol: str) -> Dict[str, Any]:
     return {
         "news_id": news_id,
         "symbol": symbol,
-        "discussion": parsed.get("discussion", ""),
-        "growth_reasons": parsed.get("growth_reasons", ""),
-        "decrease_reasons": parsed.get("decrease_reasons", ""),
+        "discussion": discussion_text,
+        "growth_reasons": growth_text,
+        "decrease_reasons": decrease_text,
     }
 
 
@@ -126,6 +143,7 @@ def generate_story(symbol: str, csv_content: str) -> str:
     client = OpenAI(
         api_key=settings.deepseek_api_key,
         base_url=settings.deepseek_base_url,
+        timeout=90.0,
     )
 
     response = client.chat.completions.create(
@@ -204,7 +222,7 @@ def analyze_range(symbol: str, start_date: str, end_date: str, question: Optiona
     # Build news context for prompt
     news_context = ""
     for i, row in enumerate(news_rows[:30], 1):
-        ret = f"当日涨跌: {row['ret_t0']*100:.2f}%" if row["ret_t0"] else ""
+        ret = f"当日涨跌: {row['ret_t0']*100:.2f}%" if row["ret_t0"] is not None else ""
         news_context += f"\n{i}. [{row['trade_date']}] {row['title']}\n"
         if row.get("chinese_summary"):
             news_context += f"   摘要: {row['chinese_summary']}\n"
@@ -216,6 +234,7 @@ def analyze_range(symbol: str, start_date: str, end_date: str, question: Optiona
     client = OpenAI(
         api_key=settings.deepseek_api_key,
         base_url=settings.deepseek_base_url,
+        timeout=90.0,
     )
 
     question_part = f"用户的具体问题是: {question}。请重点回答这个问题。\n\n" if question else ""

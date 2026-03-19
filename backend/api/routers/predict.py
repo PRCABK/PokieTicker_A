@@ -11,7 +11,7 @@ MODELS_DIR = Path(__file__).resolve().parent.parent.parent / "ml" / "models"
 
 
 @router.get("/{symbol}")
-def get_prediction(symbol: str, horizon: str = Query("t1", pattern="^t[15]$")):
+def get_prediction(symbol: str, horizon: str = Query("t1", pattern="^t[135]$")):
     """Get direction prediction for a symbol."""
     from backend.ml.model import predict
 
@@ -22,7 +22,7 @@ def get_prediction(symbol: str, horizon: str = Query("t1", pattern="^t[15]$")):
 
 
 @router.get("/{symbol}/backtest")
-def get_backtest(symbol: str, horizon: str = Query("t1", pattern="^t[15]$")):
+def get_backtest(symbol: str, horizon: str = Query("t1", pattern="^t[135]$")):
     """Get backtest results for a symbol."""
     sym = symbol.upper()
     path = MODELS_DIR / f"{sym}_{horizon}_backtest.json"
@@ -38,7 +38,7 @@ def get_forecast(symbol: str, window: int = Query(7, ge=3, le=60)):
 
     result = generate_forecast(symbol.upper(), window)
     if "error" in result:
-        return result
+        raise HTTPException(status_code=404, detail=result["error"])
     return result
 
 

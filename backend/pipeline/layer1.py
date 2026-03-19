@@ -128,6 +128,7 @@ def process_batch_group(
     client = OpenAI(
         api_key=settings.deepseek_api_key,
         base_url=settings.deepseek_base_url,
+        timeout=90.0,
     )
     conn = get_conn()
 

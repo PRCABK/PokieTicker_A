@@ -104,7 +104,7 @@ export default function RangeAnalysisPanel({ symbol, startDate, endDate, questio
 
           {/* Price summary card */}
           <div className="range-price-card">
-            <div className="range-dates">{data.start_date} to {data.end_date}</div>
+            <div className="range-dates">{data.start_date} ~ {data.end_date}</div>
             <div className="range-price-row">
               <span className="range-price">¥{data.open_price.toFixed(2)} → ¥{data.close_price.toFixed(2)}</span>
               <span className={`range-change ${isUp ? 'up' : 'down'}`}>

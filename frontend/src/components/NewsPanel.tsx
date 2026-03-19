@@ -24,12 +24,14 @@ interface NewsItem {
 
 interface Props {
   symbol: string;
+  refreshKey?: number;
   hoveredDate: string | null;
   onFindSimilar?: (newsId: string) => void;
   highlightedNewsId?: string | null;
   isLocked?: boolean;
   onUnlock?: () => void;
   highlightedCategoryIds?: string[];
+  categoryFilterActive?: boolean;
 }
 
 function sortBySentiment(items: NewsItem[]): NewsItem[] {
@@ -44,11 +46,21 @@ function sortBySentiment(items: NewsItem[]): NewsItem[] {
 function pct(v: number | null) {
   if (v === null || v === undefined) return '-';
   const pctVal = v * 100;
-  const color = pctVal > 0 ? '#26a69a' : pctVal < 0 ? '#ef5350' : '#888';
+  const color = pctVal > 0 ? '#ef5350' : pctVal < 0 ? '#26a69a' : '#888';
   return <span style={{ color, fontWeight: 600 }}>{pctVal > 0 ? '+' : ''}{pctVal.toFixed(2)}%</span>;
 }
 
-export default function NewsPanel({ symbol, hoveredDate, onFindSimilar, highlightedNewsId, isLocked, onUnlock, highlightedCategoryIds }: Props) {
+export default function NewsPanel({
+  symbol,
+  refreshKey,
+  hoveredDate,
+  onFindSimilar,
+  highlightedNewsId,
+  isLocked,
+  onUnlock,
+  highlightedCategoryIds,
+  categoryFilterActive,
+}: Props) {
   const [news, setNews] = useState<NewsItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [displayDate, setDisplayDate] = useState<string | null>(null);
@@ -59,7 +71,6 @@ export default function NewsPanel({ symbol, hoveredDate, onFindSimilar, highligh
   // Debounced fetch on hover
   useEffect(() => {
     if (!symbol || !hoveredDate) return;
-    // If locked and date hasn't changed, skip refetch
     if (isLocked && displayDate === hoveredDate) return;
 
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -84,14 +95,19 @@ export default function NewsPanel({ symbol, hoveredDate, onFindSimilar, highligh
         .catch(() => {})
         .finally(() => setLoading(false));
     }, 120);
-  }, [symbol, hoveredDate]);
+  }, [symbol, hoveredDate, refreshKey, isLocked, displayDate]);
 
-  // Clear cache on symbol change
+  // Clear cache + state on symbol change
   useEffect(() => {
     cacheRef.current.clear();
     setNews([]);
     setDisplayDate(null);
   }, [symbol]);
+
+  // Clear cache when upstream pipeline refreshes
+  useEffect(() => {
+    cacheRef.current.clear();
+  }, [refreshKey]);
 
   // Auto-scroll to highlighted article
   useEffect(() => {
@@ -102,13 +118,8 @@ export default function NewsPanel({ symbol, hoveredDate, onFindSimilar, highligh
     }
   }, [highlightedNewsId, news]);
 
-  const categorySet = highlightedCategoryIds && highlightedCategoryIds.length > 0
-    ? new Set(highlightedCategoryIds)
-    : null;
-
-  // If category filter is active but NO articles on this date match, disable dimming
-  const hasAnyMatch = categorySet != null && news.some((item) => categorySet.has(item.news_id));
-  const effectiveCategorySet = (categorySet != null && !hasAnyMatch) ? null : categorySet;
+  const categorySet = categoryFilterActive ? new Set(highlightedCategoryIds ?? []) : null;
+  const filteredNews = categorySet ? news.filter((item) => categorySet.has(item.news_id)) : news;
 
   if (!displayDate) {
     return (
@@ -116,7 +127,7 @@ export default function NewsPanel({ symbol, hoveredDate, onFindSimilar, highligh
         <div className="news-panel-header">
           <h2>新闻</h2>
         </div>
-        <div className="news-empty">点击图表上的小圆点查看新闻</div>
+        <div className="news-empty">点击图表上的圆点查看新闻</div>
       </div>
     );
   }
@@ -126,7 +137,7 @@ export default function NewsPanel({ symbol, hoveredDate, onFindSimilar, highligh
       <div className="news-panel-header">
         <h2>新闻</h2>
         <span className="news-date-badge">{displayDate}</span>
-        <span className="news-count">共 {news.length} 篇</span>
+        <span className="news-count">共 {filteredNews.length} 篇</span>
         {isLocked && (
           <button className="lock-badge" onClick={onUnlock} title="点击解锁">
             已锁定
@@ -138,72 +149,71 @@ export default function NewsPanel({ symbol, hoveredDate, onFindSimilar, highligh
         <div className="news-empty">加载中...</div>
       ) : news.length === 0 ? (
         <div className="news-empty">这一天没有新闻</div>
+      ) : categoryFilterActive && filteredNews.length === 0 ? (
+        <div className="news-empty">当前筛选条件下无新闻</div>
       ) : (
         <div className="news-list" ref={listRef}>
-          {news.map((item) => {
-            const isDimmed = effectiveCategorySet != null && !effectiveCategorySet.has(item.news_id);
-            return (
-              <div
-                key={item.news_id}
-                data-news-id={item.news_id}
-                className={`news-card ${item.sentiment === 'positive' ? 'card-positive' : item.sentiment === 'negative' ? 'card-negative' : 'card-neutral'}${highlightedNewsId === item.news_id ? ' card-highlighted' : ''}${isDimmed ? ' card-dimmed' : ''}`}
-              >
-                <div className="news-card-top">
-                  <span className={`sentiment-dot ${item.sentiment || 'neutral'}`} />
-                  <a href={item.article_url} target="_blank" rel="noreferrer" className="news-title">
-                    {item.title}
-                  </a>
+          {filteredNews.map((item) => (
+            <div
+              key={item.news_id}
+              data-news-id={item.news_id}
+              className={`news-card ${item.sentiment === 'positive' ? 'card-positive' : item.sentiment === 'negative' ? 'card-negative' : 'card-neutral'}${highlightedNewsId === item.news_id ? ' card-highlighted' : ''}`}
+            >
+              <div className="news-card-top">
+                <span className={`sentiment-dot ${item.sentiment || 'neutral'}`} />
+                <a href={item.article_url} target="_blank" rel="noreferrer" className="news-title">
+                  {item.title}
+                </a>
+              </div>
+
+              {item.image_url && (
+                <div className="news-image-wrap">
+                  <img
+                    src={item.image_url}
+                    alt=""
+                    className="news-image"
+                    loading="lazy"
+                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                  />
                 </div>
+              )}
 
-                {item.image_url && (
-                  <div className="news-image-wrap">
-                    <img
-                      src={item.image_url}
-                      alt=""
-                      className="news-image"
-                      loading="lazy"
-                      onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                    />
-                  </div>
-                )}
+              {item.key_discussion && (
+                <p className="news-summary">{item.key_discussion}</p>
+              )}
 
-                {item.key_discussion && (
-                  <p className="news-summary">{item.key_discussion}</p>
-                )}
+              {(item.reason_growth || item.reason_decrease) && (
+                <div className="news-reasons">
+                  {item.reason_growth && (
+                    <div className="reason up">
+                      <span className="reason-icon">+</span> {item.reason_growth}
+                    </div>
+                  )}
+                  {item.reason_decrease && (
+                    <div className="reason down">
+                      <span className="reason-icon">-</span> {item.reason_decrease}
+                    </div>
+                  )}
+                </div>
+              )}
 
-                {(item.reason_growth || item.reason_decrease) && (
-                  <div className="news-reasons">
-                    {item.reason_growth && (
-                      <div className="reason up">
-                        <span className="reason-icon">+</span> {item.reason_growth}
-                      </div>
-                    )}
-                    {item.reason_decrease && (
-                      <div className="reason down">
-                        <span className="reason-icon">-</span> {item.reason_decrease}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                <div className="news-card-footer">
-                  <span className="news-publisher">{item.publisher}</span>
-                  <div className="returns-chips">
-                    <span className="ret-chip">T+1 {pct(item.ret_t1)}</span>
-                    <span className="ret-chip">T+5 {pct(item.ret_t5)}</span>
-                    {onFindSimilar && (
-                      <button
-                        className="find-similar-btn"
-                        onClick={(e) => { e.stopPropagation(); onFindSimilar(item.news_id); }}
-                      >
-                        寻找相似
-                      </button>
-                    )}
-                  </div>
+              <div className="news-card-footer">
+                <span className="news-publisher">{item.publisher}</span>
+                <div className="returns-chips">
+                  <span className="ret-chip">T+1 {pct(item.ret_t1)}</span>
+                  <span className="ret-chip">T+5 {pct(item.ret_t5)}</span>
+                  {onFindSimilar && (
+                    <button
+                      className="find-similar-btn"
+                      onClick={(e) => { e.stopPropagation(); onFindSimilar(item.news_id); }}
+                    >
+                      寻找相似
+                    </button>
+                  )}
                 </div>
               </div>
-            );
-          })}
+            </div>
+          ))}
         </div>
       )}
     </div>

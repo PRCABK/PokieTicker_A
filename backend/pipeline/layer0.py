@@ -33,8 +33,11 @@ def _check_article(
         return False, "empty_description"
 
     # Rule 2: Description too short
+    # Eastmoney list API may only provide title as description; keep medium-length titles.
     if len(desc) < 20:
-        return False, "description_too_short"
+        title_text = (title or "").strip()
+        if not (desc == title_text and len(title_text) >= 8):
+            return False, "description_too_short"
 
     # Rule 3: Market roundup — mentions >10 tickers and target not in title
     tickers: list = []

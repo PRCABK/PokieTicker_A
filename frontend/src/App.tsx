@@ -8,6 +8,7 @@ import RangeAnalysisPanel from './components/RangeAnalysisPanel';
 import RangeQueryPopup from './components/RangeQueryPopup';
 import RangeNewsPanel from './components/RangeNewsPanel';
 import SimilarDaysPanel from './components/SimilarDaysPanel';
+import SimilarNewsPanel from './components/SimilarNewsPanel';
 import PredictionPanel from './components/PredictionPanel';
 import './App.css';
 
@@ -39,6 +40,7 @@ function App() {
   const [selectedRange, setSelectedRange] = useState<RangeSelection | null>(null);
   const [rangeQuestion, setRangeQuestion] = useState<string | null>(null);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const [selectedSimilarNewsId, setSelectedSimilarNewsId] = useState<string | null>(null);
   const [selectedArticle, setSelectedArticle] = useState<ArticleSelection | null>(null);
 
   // Locked article state (click-to-lock)
@@ -91,6 +93,7 @@ function App() {
     setRangeQuestion(null);
     if (range) {
       setSelectedDay(null);
+      setSelectedSimilarNewsId(null);
       setSelectedArticle(null);
       setLockedArticle(null);
     }
@@ -115,6 +118,7 @@ function App() {
       setSelectedRange(null);
       setRangeQuestion(null);
       setSelectedDay(null);
+      setSelectedSimilarNewsId(null);
       setHoveredDate(article.date);
       return article;
     });
@@ -124,12 +128,20 @@ function App() {
     setSelectedDay(date);
     setSelectedRange(null);
     setRangeQuestion(null);
+    setSelectedSimilarNewsId(null);
     setSelectedArticle(null);
     setLockedArticle(null);
   }, []);
 
   const handleRangeAsk = useCallback((question: string) => {
     setRangeQuestion(question);
+  }, []);
+
+  const handleFindSimilarNews = useCallback((newsId: string) => {
+    setSelectedSimilarNewsId(newsId);
+    setSelectedRange(null);
+    setRangeQuestion(null);
+    setSelectedDay(null);
   }, []);
 
   const handleCategoryChange = useCallback((category: string | null, articleIds: string[], color?: string) => {
@@ -142,6 +154,15 @@ function App() {
   const [refreshKey, setRefreshKey] = useState(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, []);
+
   function handleSelectSymbol(symbol: string) {
     setSelectedSymbol(symbol);
     setHoveredDate(null);
@@ -149,6 +170,7 @@ function App() {
     setSelectedRange(null);
     setRangeQuestion(null);
     setSelectedDay(null);
+    setSelectedSimilarNewsId(null);
     setSelectedArticle(null);
     setLockedArticle(null);
     setActiveCategory(null);
@@ -163,29 +185,46 @@ function App() {
 
     // Trigger background news fetch whenever a stock is selected
     axios.post('/api/pipeline/fetch', { symbol }).then((res) => {
-      if (res.data?.status === 'up_to_date') return;
-      // Poll for data to appear in DB (every 3s, max 60s)
+      const fetchStatus = res.data?.status as string | undefined;
+      const fetchEnd = typeof res.data?.end === 'string' ? String(res.data.end).slice(0, 10) : null;
+
+      if (fetchStatus === 'up_to_date') {
+        setRefreshKey((k) => k + 1);
+        return;
+      }
+
+      // Poll pipeline status (every 3s, max 120s) until fetch + Layer1 are done.
       let attempts = 0;
       let ohlcReady = false;
       pollRef.current = setInterval(() => {
         attempts++;
-        if (attempts > 20) {
+        if (attempts > 40) {
           if (pollRef.current) clearInterval(pollRef.current);
           pollRef.current = null;
+          setRefreshKey((k) => k + 1);
           return;
         }
-        // Check OHLC first, refresh once it appears
-        if (!ohlcReady) {
-          axios.get(`/api/stocks/${symbol}/ohlc`).then((r) => {
-            if (r.data && r.data.length > 0) {
-              ohlcReady = true;
-              setRefreshKey((k) => k + 1);
-            }
-          }).catch(() => {});
-        }
-        // Then check news, stop polling once news appears
-        axios.get(`/api/news/${symbol}/particles`).then((r) => {
-          if (r.data && r.data.length > 0) {
+
+        axios.get(`/api/pipeline/status/${symbol}`).then((r) => {
+          const status = r.data || {};
+          const ohlcCount = Number(status.ohlc_count ?? 0);
+          const pendingAlignment = Number(status.pending_alignment ?? 0);
+          const pendingLayer1 = Number(status.pending_layer1 ?? 0);
+          const deepseekEnabled = Boolean(status.deepseek_enabled);
+          const lastNewsFetch = typeof status.last_news_fetch === 'string'
+            ? String(status.last_news_fetch).slice(0, 10)
+            : null;
+
+          if (!ohlcReady && ohlcCount > 0) {
+            ohlcReady = true;
+            setRefreshKey((k) => k + 1);
+          }
+
+          const fetchDone = !fetchEnd || (lastNewsFetch !== null && lastNewsFetch >= fetchEnd);
+          const alignedDone = pendingAlignment === 0;
+          const layer1Done = !deepseekEnabled || pendingLayer1 === 0;
+
+          if (fetchDone && alignedDone && layer1Done) {
             setRefreshKey((k) => k + 1);
             if (pollRef.current) clearInterval(pollRef.current);
             pollRef.current = null;
@@ -198,7 +237,6 @@ function App() {
   function handleAddTicker(symbol: string) {
     if (!activeTickers.includes(symbol)) {
       setActiveTickers((prev) => [...prev, symbol]);
-      axios.post('/api/stocks', { symbol }).catch(console.error);
     }
   }
 
@@ -206,7 +244,7 @@ function App() {
   const effectiveDate = lockedArticle?.date ?? hoveredDate;
   const isLocked = lockedArticle !== null;
 
-  // Right panel priority: rangeQuestion > rangeNews > selectedDay > default NewsPanel
+  // Right panel priority: rangeQuestion > rangeNews > similarNews > selectedDay > default NewsPanel
   function renderRightPanel() {
     if (selectedRange && rangeQuestion) {
       return (
@@ -234,6 +272,15 @@ function App() {
         />
       );
     }
+    if (selectedSimilarNewsId) {
+      return (
+        <SimilarNewsPanel
+          newsId={selectedSimilarNewsId}
+          symbol={selectedSymbol}
+          onClose={() => setSelectedSimilarNewsId(null)}
+        />
+      );
+    }
     if (selectedDay) {
       return (
         <SimilarDaysPanel
@@ -247,17 +294,17 @@ function App() {
       <>
         <NewsPanel
           symbol={selectedSymbol}
+          refreshKey={refreshKey}
           hoveredDate={effectiveDate}
-          onFindSimilar={(_newsId: string) => {
-            if (effectiveDate) handleDayClick(effectiveDate);
-          }}
+          onFindSimilar={handleFindSimilarNews}
           highlightedNewsId={selectedArticle?.newsId || null}
           isLocked={isLocked}
           onUnlock={() => {
             setLockedArticle(null);
             setSelectedArticle(null);
           }}
-          highlightedCategoryIds={activeCategoryIds.length > 0 ? activeCategoryIds : undefined}
+          highlightedCategoryIds={activeCategory !== null ? activeCategoryIds : undefined}
+          categoryFilterActive={activeCategory !== null}
         />
       </>
     );
@@ -278,7 +325,7 @@ function App() {
         {selectedRange ? (
           <div className="header-ohlc">
             <span className="ohlc-date">{selectedRange.startDate} ~ {selectedRange.endDate}</span>
-            <span className="range-badge">已选择范围</span>
+            <span className="range-badge">已选择区间</span>
           </div>
         ) : hoveredOhlc ? (
           <div className="header-ohlc">
@@ -318,7 +365,7 @@ function App() {
                 symbol={selectedSymbol}
                 refreshKey={refreshKey}
                 lockedNewsId={lockedArticle?.newsId ?? null}
-                highlightedArticleIds={activeCategoryIds.length > 0 ? activeCategoryIds : null}
+                highlightedArticleIds={activeCategory !== null ? activeCategoryIds : null}
                 highlightColor={activeCategoryColor}
                 onHover={handleHover}
                 onRangeSelect={handleRangeSelect}
@@ -335,7 +382,7 @@ function App() {
               )}
             </>
           ) : (
-            <div className="chart-placeholder">请选择一个股票以查看图表</div>
+            <div className="chart-placeholder">请选择一只股票查看图表</div>
           )}
         </div>
         {selectedSymbol && (

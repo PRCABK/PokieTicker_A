@@ -62,10 +62,10 @@ export default function NewsCategoryPanel({ symbol, refreshKey, activeCategory, 
     let color: string;
     if (filter === 'positive') {
       ids = cat.positive_ids;
-      color = '#00e676';
+      color = '#ff5252';
     } else if (filter === 'negative') {
       ids = cat.negative_ids;
-      color = '#ff5252';
+      color = '#00e676';
     } else {
       ids = cat.article_ids;
       color = meta.color;

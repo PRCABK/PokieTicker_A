@@ -43,7 +43,7 @@ interface Props {
 function pct(v: number | null) {
   if (v === null || v === undefined) return '-';
   const p = v * 100;
-  const color = p > 0 ? '#26a69a' : p < 0 ? '#ef5350' : '#888';
+  const color = p > 0 ? '#ef5350' : p < 0 ? '#26a69a' : '#888';
   return <span style={{ color, fontWeight: 600 }}>{p > 0 ? '+' : ''}{p.toFixed(2)}%</span>;
 }
 

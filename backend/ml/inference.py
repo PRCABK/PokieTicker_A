@@ -1,4 +1,4 @@
-"""Forecast module: aggregate recent news window → predict future trend.
+"""Forecast module: aggregate recent news window and predict future trend.
 
 Combines:
 1. Recent news aggregation (7d or 30d window)
@@ -155,10 +155,17 @@ def generate_forecast(symbol: str, window_days: int = 7) -> dict:
 
     # 1. Recent news
     recent_news = _load_recent_news(symbol, window_days, ref_date=last_date)
-    n_pos = sum(1 for n in recent_news if n.get("sentiment") == "positive")
-    n_neg = sum(1 for n in recent_news if n.get("sentiment") == "negative")
-    n_neu = sum(1 for n in recent_news if n.get("sentiment") == "neutral")
+    analyzed_all = [n for n in recent_news if n.get("sentiment") in ("positive", "negative", "neutral")]
+    analyzed_relevant = [
+        n for n in analyzed_all if n.get("relevance") == "relevant"
+    ]
+    analyzed_news = analyzed_relevant or analyzed_all
+    n_pos = sum(1 for n in analyzed_news if n.get("sentiment") == "positive")
+    n_neg = sum(1 for n in analyzed_news if n.get("sentiment") == "negative")
+    n_neu = sum(1 for n in analyzed_news if n.get("sentiment") == "neutral")
     n_total = len(recent_news)
+    n_analyzed = len(analyzed_news)
+    n_pending = max(n_total - len(analyzed_all), 0)
 
     def _impact_score(n):
         score = 0.0
@@ -175,7 +182,8 @@ def generate_forecast(symbol: str, window_days: int = 7) -> dict:
 
     impact_candidates = [
         n for n in recent_news
-        if n.get("sentiment") in ("positive", "negative")
+        if n.get("relevance") == "relevant"
+        and n.get("sentiment") in ("positive", "negative")
         and n.get("ret_t0") is not None
     ]
     if len(impact_candidates) < 5:
@@ -187,10 +195,14 @@ def generate_forecast(symbol: str, window_days: int = 7) -> dict:
 
     news_summary = {
         "total": n_total,
+        "analyzed": n_analyzed,
+        "relevant_analyzed": len(analyzed_relevant),
+        "analysis_scope": "relevant" if analyzed_relevant else "all",
+        "pending": n_pending,
         "positive": n_pos,
         "negative": n_neg,
         "neutral": n_neu,
-        "sentiment_ratio": round((n_pos - n_neg) / max(n_total, 1), 3),
+        "sentiment_ratio": round((n_pos - n_neg) / max(n_analyzed, 1), 3) if n_analyzed > 0 else 0.0,
         "top_headlines": [
             {
                 "date": n["trade_date"],
@@ -208,8 +220,8 @@ def generate_forecast(symbol: str, window_days: int = 7) -> dict:
                 "sentiment": n.get("sentiment", "unknown"),
                 "relevance": n.get("relevance"),
                 "key_discussion": (n.get("key_discussion") or "")[:150],
-                "ret_t0": round(n["ret_t0"] * 100, 2) if n.get("ret_t0") else None,
-                "ret_t1": round(n["ret_t1"] * 100, 2) if n.get("ret_t1") else None,
+                "ret_t0": round(n["ret_t0"] * 100, 2) if n.get("ret_t0") is not None else None,
+                "ret_t1": round(n["ret_t1"] * 100, 2) if n.get("ret_t1") is not None else None,
             }
             for n in impact_sorted[:5]
         ],
@@ -241,31 +253,37 @@ def generate_forecast(symbol: str, window_days: int = 7) -> dict:
             "baseline_accuracy": None,
         }
 
-    for horizon in ["t1", "t5"]:
+    for horizon in ["t1", "t3", "t5"]:
         model_path = MODELS_DIR / f"{symbol}_{horizon}.joblib"
         meta_path = MODELS_DIR / f"{symbol}_{horizon}_meta.json"
         if not model_path.exists():
-            continue
+            model_path = MODELS_DIR / f"UNIFIED_{horizon}.joblib"
+            meta_path = MODELS_DIR / f"UNIFIED_{horizon}_meta.json"
+            if not model_path.exists():
+                continue
 
         model = joblib.load(model_path)
         meta = json.loads(meta_path.read_text())
 
-        last_row = df.iloc[-1]
-        X = last_row[FEATURE_COLS].values.reshape(1, -1).astype(np.float64)
+        # Use window-level averaged features for forecast prediction so different
+        # windows (e.g. 7d vs 30d) map to different model inputs.
+        X = window_vec.reshape(1, -1).astype(np.float64)
         np.nan_to_num(X, copy=False)
 
         proba = model.predict_proba(X)[0]
         pred_class = int(np.argmax(proba))
         confidence = float(proba[pred_class])
 
-        feature_means = df[FEATURE_COLS].mean()
-        feature_stds = df[FEATURE_COLS].std().clip(lower=1e-10)
+        feature_means = df[FEATURE_COLS].mean().values.astype(np.float64)
+        feature_stds = df[FEATURE_COLS].std().values.astype(np.float64)
+        feature_stds[feature_stds < 1e-10] = 1.0
         importances = model.feature_importances_
+        vec = X[0]
 
         contributions = []
         for i, col in enumerate(FEATURE_COLS):
-            val = float(last_row[col]) if pd.notna(last_row[col]) else 0.0
-            z = (val - feature_means[col]) / feature_stds[col]
+            val = float(vec[i])
+            z = (val - feature_means[i]) / feature_stds[i]
             contrib = abs(z) * importances[i]
             contributions.append({
                 "name": col,
@@ -288,7 +306,7 @@ def generate_forecast(symbol: str, window_days: int = 7) -> dict:
         }
 
     if prediction is None:
-        # No trained model — return news-only summary instead of error
+        # No trained model: return news-only summary instead of error
         wlabel = f"过去{window_days}天" if window_days <= 7 else f"过去{window_days}天（约1个月）"
         return {
             "symbol": symbol,
@@ -298,7 +316,12 @@ def generate_forecast(symbol: str, window_days: int = 7) -> dict:
             "prediction": {},
             "similar_periods": [],
             "similar_stats": {"count": 0, "up_ratio_5d": 0, "up_ratio_10d": 0, "avg_ret_5d": None, "avg_ret_10d": None},
-            "conclusion": f"{symbol} 暂无训练好的预测模型。{wlabel}共 {n_total} 条新闻，{n_pos} 条利好 / {n_neg} 条利空。需要先运行模型训练。",
+            "conclusion": (
+                f"{symbol} 暂无训练好的预测模型。{wlabel}共 {n_total} 条新闻，"
+                f"已分析 {n_analyzed} 条（利好 {n_pos} / 利空 {n_neg}）。"
+                + (f"仍有 {n_pending} 条待分析。" if n_pending > 0 else "")
+                + "需要先运行模型训练。"
+            ),
             "no_model": True,
         }
 
@@ -346,39 +369,47 @@ def _build_conclusion(
     parts = []
 
     window_label = f"过去{window_days}天" if window_days <= 7 else f"过去{window_days}天（约1个月）"
-    n = news_summary["total"]
-    ratio = news_summary["sentiment_ratio"]
+    n_total = int(news_summary.get("total", 0) or 0)
+    n_analyzed = int(news_summary.get("analyzed", n_total) or 0)
+    n_pending = int(news_summary.get("pending", max(n_total - n_analyzed, 0)) or 0)
+    ratio = float(news_summary.get("sentiment_ratio", 0.0) or 0.0)
 
-    if n == 0:
+    if n_total == 0:
         parts.append(f"{symbol} 在{window_label}内无相关新闻。")
+    elif n_analyzed == 0:
+        parts.append(f"{symbol} 在{window_label}共有 {n_total} 条相关新闻，但尚未完成情绪分析。")
     else:
         tone = "偏多" if ratio > 0.1 else "偏空" if ratio < -0.1 else "中性"
         parts.append(
-            f"{symbol} {window_label}共 {n} 条相关新闻，"
+            f"{symbol} {window_label}共有 {n_total} 条相关新闻（已分析 {n_analyzed} 条），"
             f"{news_summary['positive']} 条利好 / {news_summary['negative']} 条利空，"
             f"整体情绪{tone}（{ratio:+.2f}）。"
         )
+        if n_pending > 0:
+            parts.append(f"仍有 {n_pending} 条新闻尚未完成情绪标注。")
 
     horizon_labels = [
-        ("短期（T+1）", "t1"), ("中期（T+3）", "t3"), ("中期（T+5）", "t5"),
+        ("短期（T+1）", "t1"),
+        ("中期（T+3）", "t3"),
+        ("中期（T+5）", "t5"),
     ]
     for h_label, h_key in horizon_labels:
         p = prediction.get(h_key)
         if not p:
             continue
-        d = "看多" if p["direction"] == "up" else "看空"
-        conf = p["confidence"] * 100
+        direction = "看多" if p["direction"] == "up" else "看空"
+        confidence = p["confidence"] * 100
         model_tag = f"[{p.get('model_type', 'XGBoost')}]" if p.get("model_type") else ""
-        parts.append(f"{model_tag} 模型{h_label}预测: {d}，置信度 {conf:.0f}%。")
+        parts.append(f"{model_tag} 模型{h_label}预测: {direction}，置信度 {confidence:.0f}%。")
 
     if similar_stats["count"] > 0:
-        ur5 = similar_stats.get("up_ratio_5d")
-        ar5 = similar_stats.get("avg_ret_5d")
-        if ur5 is not None and ar5 is not None:
+        up_ratio_5d = similar_stats.get("up_ratio_5d")
+        avg_ret_5d = similar_stats.get("avg_ret_5d")
+        if up_ratio_5d is not None and avg_ret_5d is not None:
             parts.append(
                 f"在 {similar_stats['count']} 个历史相似时段中，"
-                f"{ur5*100:.0f}% 在后续5个交易日上涨，"
-                f"平均收益 {ar5:+.1f}%。"
+                f"{up_ratio_5d * 100:.0f}% 在后续5个交易日上涨，"
+                f"平均收益 {avg_ret_5d:+.1f}%。"
             )
 
     signals = []

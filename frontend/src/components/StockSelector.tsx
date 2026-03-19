@@ -15,18 +15,13 @@ interface Props {
 }
 
 const GROUPS: Record<string, string[]> = {
-  '科技': ['AAPL', 'MSFT', 'GOOGL', 'GOOG', 'META', 'AMZN', 'CRM', 'ORCL', 'IBM', 'CSCO', 'NOW', 'WDAY', 'SNOW', 'DELL', 'ADBE'],
-  'AI / 芯片': ['NVDA', 'AMD', 'TSM', 'AVGO', 'INTC', 'QCOM', 'ARM', 'AMAT', 'LRCX', 'MU', 'MRVL', 'SMCI', 'CRWV', 'TXN', 'ASML'],
-  'AI 软件': ['AI', 'SOUN', 'SOUNW', 'CRWD', 'ANET', 'IDCC'],
-  '电车 / 汽车': ['TSLA', 'RIVN', 'LCID', 'NIO', 'LI', 'BYDDY', 'F', 'GM', 'STLA', 'TM'],
-  '中概股': ['BABA', 'JD', 'BIDU', 'NIO', 'LI', 'BILI', 'NTES', 'SE', 'MCHI', 'FXI'],
-  '金融': ['V', 'MA', 'GS', 'MS', 'BAC', 'WFC', 'C', 'BLK', 'COIN', 'HOOD', 'MARA'],
-  '媒体': ['NFLX', 'DIS', 'ROKU', 'WBD', 'ZM'],
-  '消费': ['COST', 'WMT', 'HD', 'TGT', 'NKE', 'SBUX', 'MCD', 'CMG', 'KO', 'EBAY', 'MELI'],
-  '医疗': ['UNH', 'JNJ', 'LLY', 'MRNA', 'NVO'],
-  '能源': ['XOM', 'CVX', 'OXY', 'XLE', 'USO'],
-  '通信': ['T', 'VZ'],
-  '其他': ['BA', 'UBER', 'GME', 'AMC', 'MULN', 'SQ', 'FB', 'AMJB', 'GLD', 'XLU', 'XLY', 'DIDI'],
+  '热门A股': ['600895.SH', '600519.SH', '000858.SZ', '601318.SH', '000001.SZ', '300750.SZ', '002594.SZ'],
+  '金融': ['000001.SZ', '600036.SH', '601398.SH', '601166.SH', '600030.SH', '601318.SH'],
+  '消费': ['600519.SH', '000858.SZ', '000568.SZ', '603288.SH', '600887.SH', '000333.SZ'],
+  '科技': ['002415.SZ', '000063.SZ', '600745.SH', '603019.SH', '688981.SH', '688111.SH'],
+  '新能源': ['300750.SZ', '002594.SZ', '601012.SH', '600438.SH', '002460.SZ'],
+  '医药': ['600276.SH', '000661.SZ', '300760.SZ', '603259.SH'],
+  '其他': [],
 };
 
 export default function StockSelector({ activeTickers, selectedSymbol, onSelect, onAdd }: Props) {
@@ -85,7 +80,6 @@ export default function StockSelector({ activeTickers, selectedSymbol, onSelect,
     onSelect(sym);
   }
 
-  // Build groups filtered to only tickers that exist in our data
   const activeSet = new Set(activeTickers);
   const renderedGroups = Object.entries(GROUPS)
     .map(([label, symbols]) => ({
@@ -107,7 +101,6 @@ export default function StockSelector({ activeTickers, selectedSymbol, onSelect,
 
   return (
     <div className="stock-selector">
-      {/* Current ticker button — click to open dropdown */}
       <div className="ticker-dropdown-wrapper" ref={panelRef}>
         <button
           className="ticker-current"
@@ -139,7 +132,6 @@ export default function StockSelector({ activeTickers, selectedSymbol, onSelect,
         )}
       </div>
 
-      {/* Search */}
       <div className="search-wrapper" ref={searchRef}>
         <input
           type="text"

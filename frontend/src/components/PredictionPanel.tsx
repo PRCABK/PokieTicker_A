@@ -48,6 +48,8 @@ interface ImpactArticle {
 
 interface NewsSummary {
   total: number;
+  analyzed?: number;
+  pending?: number;
   positive: number;
   negative: number;
   neutral: number;
@@ -127,14 +129,13 @@ function extractKeywords(headlines: Headline[]): string[] {
 /**
  * Parse conclusion text and return styled JSX:
  * - [ModelName] → bold purple badge
- * - bullish/leaning bullish → green bold
- * - bearish/leaning bearish → red bold
+ * - bullish/leaning bullish → red bold
+ * - bearish/leaning bearish → green bold
  * - +N% / -N% / N% → colored by sign
- * - positive → green, negative → red
+ * - positive → red, negative → green
  */
 function renderStyledText(text: string): React.ReactNode[] {
-  // Regex that matches patterns to style (both English and Chinese)
-  const pattern = /(\[[^\]]+\])|(bullish|leaning bullish|Bullish|看多|偏多|利好|偏向看多)|(bearish|leaning bearish|Bearish|看空|偏空|利空|偏向看空)|(positive|方向不明确|建议观望)|(negative)|([+-]?\d+\.?\d*%)/gi;
+  const pattern = /(\[[^\]]+\])|(\b(?:bullish|leaning bullish|bearish|leaning bearish|positive|negative)\b)|(看多|偏多|利好|看空|偏空|利空|中性|观望)|([+-]?\d+(?:\.\d+)?%)/gi;
 
   const parts: React.ReactNode[] = [];
   let lastIndex = 0;
@@ -142,48 +143,132 @@ function renderStyledText(text: string): React.ReactNode[] {
   let key = 0;
 
   while ((match = pattern.exec(text)) !== null) {
-    // Push the plain text before this match
     if (match.index > lastIndex) {
       parts.push(text.slice(lastIndex, match.index));
     }
 
-    const [full, model, bullish, bearish, positive, negative, pct] = match;
+    const [full, model, englishWord, zhWord, pct] = match;
 
     if (model) {
-      // Hide model names like [XGBoost] — just skip them
-      key++;
-    } else if (bullish) {
-      parts.push(
-        <span key={key++} className="fc-text-bull">{full}</span>
-      );
-    } else if (bearish) {
-      parts.push(
-        <span key={key++} className="fc-text-bear">{full}</span>
-      );
-    } else if (positive) {
-      parts.push(
-        <span key={key++} className="fc-text-bull">{full}</span>
-      );
-    } else if (negative) {
-      parts.push(
-        <span key={key++} className="fc-text-bear">{full}</span>
-      );
+      parts.push(<span key={key++} className="fc-text-model">{full}</span>);
+    } else if (englishWord) {
+      const lw = englishWord.toLowerCase();
+      const isBull = lw.includes('bullish') || lw === 'positive';
+      parts.push(<span key={key++} className={isBull ? 'fc-text-bull' : 'fc-text-bear'}>{full}</span>);
+    } else if (zhWord) {
+      const isBull = zhWord === '看多' || zhWord === '偏多' || zhWord === '利好';
+      const isBear = zhWord === '看空' || zhWord === '偏空' || zhWord === '利空';
+      const cls = isBull ? 'fc-text-bull' : isBear ? 'fc-text-bear' : '';
+      parts.push(cls ? <span key={key++} className={cls}>{full}</span> : full);
     } else if (pct) {
       const isNeg = pct.startsWith('-');
-      parts.push(
-        <span key={key++} className={isNeg ? 'fc-text-pct-down' : 'fc-text-pct-up'}>{full}</span>
-      );
+      parts.push(<span key={key++} className={isNeg ? 'fc-text-pct-down' : 'fc-text-pct-up'}>{full}</span>);
+    } else {
+      parts.push(full);
     }
 
     lastIndex = match.index + full.length;
   }
 
-  // Remaining text
   if (lastIndex < text.length) {
     parts.push(text.slice(lastIndex));
   }
 
   return parts;
+}
+
+function splitConclusionToBullets(text: string): string[] {
+  if (!text) return [];
+  return text
+    .split(/\n+/)
+    .flatMap((line) => line.split(/(?<=[。！？!?；;])\s*/))
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+const DRIVER_LABELS: Record<string, string> = {
+  n_articles: '新闻数量',
+  n_relevant: '相关新闻数',
+  n_positive: '利好新闻数',
+  n_negative: '利空新闻数',
+  n_neutral: '中性新闻数',
+  sentiment_score: '情绪得分',
+  relevance_ratio: '相关度占比',
+  positive_ratio: '利好占比',
+  negative_ratio: '利空占比',
+  has_news: '是否有新闻',
+  sentiment_score_3d: '3日情绪均值',
+  sentiment_score_5d: '5日情绪均值',
+  sentiment_score_10d: '10日情绪均值',
+  positive_ratio_3d: '3日利好占比',
+  positive_ratio_5d: '5日利好占比',
+  positive_ratio_10d: '10日利好占比',
+  negative_ratio_3d: '3日利空占比',
+  negative_ratio_5d: '5日利空占比',
+  negative_ratio_10d: '10日利空占比',
+  news_count_3d: '3日新闻总数',
+  news_count_5d: '5日新闻总数',
+  news_count_10d: '10日新闻总数',
+  sentiment_momentum_3d: '情绪动量(3日)',
+  ret_1d: '1日收益率',
+  ret_3d: '3日收益率',
+  ret_5d: '5日收益率',
+  ret_10d: '10日收益率',
+  volatility_5d: '5日波动率',
+  volatility_10d: '10日波动率',
+  volume_ratio_5d: '5日量比',
+  gap: '跳空幅度',
+  ma5_vs_ma20: '5日均线偏离20日',
+  rsi_14: 'RSI(14)',
+  day_of_week: '星期效应',
+};
+
+const PERCENT_FEATURES = new Set<string>([
+  'relevance_ratio',
+  'positive_ratio',
+  'negative_ratio',
+  'positive_ratio_3d',
+  'positive_ratio_5d',
+  'positive_ratio_10d',
+  'negative_ratio_3d',
+  'negative_ratio_5d',
+  'negative_ratio_10d',
+  'ret_1d',
+  'ret_3d',
+  'ret_5d',
+  'ret_10d',
+  'volatility_5d',
+  'volatility_10d',
+  'gap',
+  'ma5_vs_ma20',
+]);
+
+const INTEGER_FEATURES = new Set<string>([
+  'n_articles',
+  'n_relevant',
+  'n_positive',
+  'n_negative',
+  'n_neutral',
+  'news_count_3d',
+  'news_count_5d',
+  'news_count_10d',
+]);
+
+function formatDriverName(name: string): string {
+  return DRIVER_LABELS[name] ?? name;
+}
+
+function formatDriverValue(name: string, value: number): string {
+  if (name === 'has_news') return value >= 0.5 ? '有' : '无';
+  if (name === 'day_of_week') {
+    const days = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+    const idx = Math.max(0, Math.min(6, Math.round(value)));
+    return days[idx];
+  }
+  if (name === 'rsi_14') return value.toFixed(1);
+  if (INTEGER_FEATURES.has(name)) return `${Math.round(value)}`;
+  if (PERCENT_FEATURES.has(name)) return `${value >= 0 ? '+' : ''}${(value * 100).toFixed(2)}%`;
+  return value.toFixed(3);
 }
 
 export default function PredictionPanel({ symbol, refreshKey }: Props) {
@@ -197,18 +282,32 @@ export default function PredictionPanel({ symbol, refreshKey }: Props) {
   const [deepLoading, setDeepLoading] = useState<string | null>(null);
   const [deepResults, setDeepResults] = useState<Record<string, DeepAnalysis>>({});
 
+  async function fetchForecast(window: number): Promise<Forecast | null> {
+    try {
+      const res = await axios.get(`/api/predict/${symbol}/forecast?window=${window}`);
+      return res.data as Forecast;
+    } catch (err) {
+      if (axios.isAxiosError(err) && err.response?.status === 404) {
+        return null;
+      }
+      throw err;
+    }
+  }
+
   useEffect(() => {
     if (!symbol) return;
     setLoading(true);
     setError('');
-    Promise.all([
-      axios.get(`/api/predict/${symbol}/forecast?window=7`).then((res) => res.data as Forecast).catch(() => null),
-      axios.get(`/api/predict/${symbol}/forecast?window=30`).then((res) => res.data as Forecast).catch(() => null),
-    ])
+    Promise.all([fetchForecast(7), fetchForecast(30)])
       .then(([f7, f30]) => {
         setForecast7(f7);
         setForecast30(f30);
         if (!f7 && !f30) setError('No model available');
+      })
+      .catch(() => {
+        setForecast7(null);
+        setForecast30(null);
+        setError('Forecast request failed');
       })
       .finally(() => setLoading(false));
   }, [symbol, refreshKey]);
@@ -255,10 +354,7 @@ export default function PredictionPanel({ symbol, refreshKey }: Props) {
         const maxAttempts = 30; // up to ~2.5 minutes
         const poll = () => {
           attempts++;
-          Promise.all([
-            axios.get(`/api/predict/${symbol}/forecast?window=7`).then((res) => res.data as Forecast).catch(() => null),
-            axios.get(`/api/predict/${symbol}/forecast?window=30`).then((res) => res.data as Forecast).catch(() => null),
-          ]).then(([f7, f30]) => {
+          Promise.all([fetchForecast(7), fetchForecast(30)]).then(([f7, f30]) => {
             const stillNoModel = (f7?.no_model && f30?.no_model) || (f7?.no_model && !f30) || (!f7 && f30?.no_model) || (!f7 && !f30);
             if (!stillNoModel) {
               // Model is ready
@@ -275,6 +371,10 @@ export default function PredictionPanel({ symbol, refreshKey }: Props) {
               setLoading(false);
               setTraining(false);
             }
+          }).catch(() => {
+            setError('Forecast request failed');
+            setLoading(false);
+            setTraining(false);
           });
         };
         setTimeout(poll, 5000);
@@ -337,7 +437,8 @@ export default function PredictionPanel({ symbol, refreshKey }: Props) {
 
         {ns && (
           <span className="pred-news-badge">
-            共 {ns.total} 篇新闻 · {ns.positive}+ {ns.negative}-
+            共 {ns.total} 篇新闻 · 利好 {ns.positive} / 利空 {ns.negative}
+            {(ns.pending ?? 0) > 0 ? ` · 待分析 ${ns.pending}` : ''}
           </span>
         )}
 
@@ -415,9 +516,7 @@ function ForecastSection({
   const ns = forecast.news_summary;
   const stats = forecast.similar_stats;
 
-  const conclusionBullets = forecast.conclusion
-    ? forecast.conclusion.split(/(?<=[.!?。！？])\s*/).filter((s) => s.trim().length > 0)
-    : [];
+  const conclusionBullets = splitConclusionToBullets(forecast.conclusion || '');
 
   return (
     <div className="fc-section-block">
@@ -459,11 +558,11 @@ function ForecastSection({
         <div className="fc-impact-section">
           <div className="fc-section-title">关键影响新闻</div>
           {ns.top_impact.map((article) => {
-            const retClass = (article.ret_t0 ?? 0) >= 0 ? 'up' : 'down';
+            const retClass = article.ret_t0 == null ? 'neutral' : article.ret_t0 >= 0 ? 'up' : 'down';
             const deep = deepResults[article.news_id];
             const isAnalyzing = deepLoading === article.news_id;
             return (
-              <div key={article.news_id} className={`fc-impact-card fc-impact-${retClass}`}>
+              <div key={article.news_id} className={`fc-impact-card ${retClass !== 'neutral' ? `fc-impact-${retClass}` : ''}`}>
                 <div className="fc-impact-header">
                   <span className={`fc-impact-ret ${retClass}`}>
                     {article.ret_t0 != null ? `${article.ret_t0 >= 0 ? '+' : ''}${article.ret_t0.toFixed(2)}%` : '-'}
@@ -530,7 +629,7 @@ function ForecastSection({
             </div>
             <div className="fc-stat">
               <span className="fc-stat-label">5日平均收益</span>
-              <span className={`fc-stat-value ${(stats.avg_ret_5d ?? 0) >= 0 ? 'up' : 'down'}`}>
+              <span className={`fc-stat-value ${stats.avg_ret_5d == null ? 'neutral' : (stats.avg_ret_5d >= 0 ? 'up' : 'down')}`}>
                 {stats.avg_ret_5d != null ? `${stats.avg_ret_5d >= 0 ? '+' : ''}${stats.avg_ret_5d.toFixed(1)}%` : '-'}
               </span>
             </div>
@@ -542,7 +641,7 @@ function ForecastSection({
             </div>
             <div className="fc-stat">
               <span className="fc-stat-label">10日平均收益</span>
-              <span className={`fc-stat-value ${(stats.avg_ret_10d ?? 0) >= 0 ? 'up' : 'down'}`}>
+              <span className={`fc-stat-value ${stats.avg_ret_10d == null ? 'neutral' : (stats.avg_ret_10d >= 0 ? 'up' : 'down')}`}>
                 {stats.avg_ret_10d != null ? `${stats.avg_ret_10d >= 0 ? '+' : ''}${stats.avg_ret_10d.toFixed(1)}%` : '-'}
               </span>
             </div>
@@ -605,15 +704,17 @@ function PredictionCard({ label, pred }: { label: string; pred: HorizonPredictio
         <div className="fc-drivers">
           {pred.top_drivers.slice(0, 4).map((d) => (
             <div key={d.name} className="fc-driver-row">
-              <span className="fc-driver-name">{d.name}</span>
+              <span className="fc-driver-name" title={`${formatDriverName(d.name)} (${d.name})`}>
+                {formatDriverName(d.name)}
+              </span>
               <div className="fc-driver-bar-track">
                 <div
                   className={`fc-driver-bar-fill ${d.z_score > 0 ? 'up' : 'down'}`}
                   style={{ width: `${(d.contribution / maxContrib) * 100}%` }}
                 />
               </div>
-              <span className="fc-driver-val">
-                {d.value.toFixed(2)} ({d.z_score > 0 ? '+' : ''}{d.z_score.toFixed(1)}\u03C3)
+              <span className="fc-driver-val" title={`${d.name}=${d.value.toFixed(6)}, z=${d.z_score.toFixed(2)}`}>
+                {formatDriverValue(d.name, d.value)} · z={d.z_score > 0 ? '+' : ''}{d.z_score.toFixed(1)}\u03C3
               </span>
             </div>
           ))}

@@ -6,7 +6,7 @@
 
 ## 功能
 
-- **K线图 + 新闻粒子** — 每个交易日下方的彩色圆点代表当日新闻，绿色=利好，红色=利空，点击查看详情
+- **K线图 + 新闻粒子** — 每个交易日下方的彩色圆点代表当日新闻，红色=利好，绿色=利空，点击查看详情
 - **新闻分类筛选** — 按市场影响、政策影响、财报业绩、产品技术、市场竞争、管理层变动分类过滤
 - **AI 趋势预测** — 基于近 7/30 天新闻情感 + 技术指标，XGBoost 模型预测 T+1/T+3/T+5 涨跌方向
 - **历史相似匹配** — 余弦相似度查找历史上相似的新闻模式，参考后续走势
@@ -95,7 +95,7 @@ uvicorn backend.api.main:app --reload
 cd frontend && npm run dev
 ```
 
-打开 **http://localhost:5173** 即可使用。
+打开 **http://localhost:7777** 即可使用。
 
 ## 使用流程
 
@@ -113,9 +113,9 @@ cd frontend && npm run dev
 - **市场情绪** — 全市场情感指标
 
 **训练方式：**
-- 扩展窗口交叉验证（避免未来数据泄露）
-- 自动选择最优阈值
-- 支持 XGBoost 和 LSTM 两种模型
+- 时序切分（前 80% 训练，后 20% 测试）
+- 支持 XGBoost 主模型
+- LSTM 为可选扩展（已提供接口接入点）
 
 ## 项目结构
 
@@ -125,7 +125,7 @@ init.sql                          # MySQL 建表脚本
 requirements.txt                  # Python 依赖
 
 backend/
-  config.py                       # pydantic-settings，加载 config.yml
+  config.py                       # 读取 config.yml 配置
   database.py                     # MySQL 连接管理
   tushare/
     client.py                     # Tushare行情 + 东方财富新闻接口

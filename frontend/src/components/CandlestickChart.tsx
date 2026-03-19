@@ -56,8 +56,8 @@ interface Props {
 
 // Sentiment → color mapping (neon terminal palette)
 const SENTIMENT_COLOR: Record<string, string> = {
-  positive: '#00e676',
-  negative: '#ff5252',
+  positive: '#ff5252',
+  negative: '#00e676',
   neutral: '#00e5ff',
 };
 const SENTIMENT_COLOR_DEFAULT = '#555';
@@ -108,9 +108,10 @@ export default function CandlestickChart({ symbol, refreshKey, lockedNewsId, hig
   }, [lockedNewsId]);
 
   useEffect(() => {
-    highlightedIdsRef.current = highlightedArticleIds && highlightedArticleIds.length > 0
-      ? new Set(highlightedArticleIds)
-      : null;
+    highlightedIdsRef.current =
+      highlightedArticleIds !== null && highlightedArticleIds !== undefined
+        ? new Set(highlightedArticleIds)
+        : null;
     highlightColorRef.current = highlightColor ?? null;
     drawParticles(hoveredParticleRef.current);
   }, [highlightedArticleIds, highlightColor]);
@@ -297,7 +298,7 @@ export default function CandlestickChart({ symbol, refreshKey, lockedNewsId, hig
       .attr('x2', (d) => x(d.date))
       .attr('y1', (d) => y(d.high))
       .attr('y2', (d) => y(d.low))
-      .attr('stroke', (d) => (d.close >= d.open ? '#00e676' : '#ff5252'))
+      .attr('stroke', (d) => (d.close >= d.open ? '#ff5252' : '#00e676'))
       .attr('stroke-width', 1);
 
     // Bodies
@@ -306,7 +307,7 @@ export default function CandlestickChart({ symbol, refreshKey, lockedNewsId, hig
       .attr('y', (d) => y(Math.max(d.open, d.close)))
       .attr('width', candleWidth)
       .attr('height', (d) => Math.max(1, Math.abs(y(d.open) - y(d.close))))
-      .attr('fill', (d) => (d.close >= d.open ? '#00e676' : '#ff5252'));
+      .attr('fill', (d) => (d.close >= d.open ? '#ff5252' : '#00e676'));
 
     // --- Place particles overlaid on K-line ---
     // Group particles by trade_date
@@ -569,7 +570,7 @@ export default function CandlestickChart({ symbol, refreshKey, lockedNewsId, hig
           if (tooltip) {
             if (hit) {
               const retStr = hit.rt1 !== null ? `${(hit.rt1 * 100).toFixed(2)}%` : '-';
-              const retColor = hit.rt1 !== null ? (hit.rt1 >= 0 ? '#00e676' : '#ff5252') : '#555';
+              const retColor = hit.rt1 !== null ? (hit.rt1 >= 0 ? '#ff5252' : '#00e676') : '#555';
               tooltip.innerHTML = `
                 <div class="pt-title">${hit.t}</div>
                 <div class="pt-meta">

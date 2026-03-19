@@ -2,6 +2,7 @@
 
 import csv
 import json
+import re
 from pathlib import Path
 
 from backend.database import get_conn, init_db
@@ -35,6 +36,27 @@ TICKER_NAMES = {
 }
 
 OUTPUT_DIR = DATA_DIR / "output"
+
+
+def _infer_symbol_from_parsed(parsed: dict, json_file: Path) -> str | None:
+    """Infer ticker symbol from parsed payload or filename."""
+    for key in ("symbol", "ts_code", "ticker"):
+        raw = parsed.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip().upper()
+
+    raw_tickers = parsed.get("tickers")
+    if isinstance(raw_tickers, list) and raw_tickers:
+        first = raw_tickers[0]
+        if isinstance(first, str) and first.strip():
+            return first.strip().upper()
+
+    stem_upper = json_file.stem.upper()
+    for token in re.split(r"[_\-\.]", stem_upper):
+        if token in TICKER_NAMES:
+            return token
+
+    return None
 
 
 def migrate_tickers(conn):
@@ -155,7 +177,10 @@ def migrate_parsed_output(conn):
             news_id = parsed.get("id")
             if not news_id:
                 continue
-            symbol = "BABA"
+            symbol = _infer_symbol_from_parsed(parsed, json_file)
+            if not symbol:
+                print(f"  SKIP {json_file.name}: symbol not found")
+                continue
             cur.execute(
                 """INSERT IGNORE INTO layer1_results
                    (news_id, symbol, relevance, key_discussion, chinese_summary,

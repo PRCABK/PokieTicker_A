@@ -135,10 +135,15 @@ def build_features(symbol: str) -> pd.DataFrame:
     df["day_of_week"] = df["trade_date"].dt.dayofweek
 
     # --- Targets: next-N-day direction ---
-    df["target_t1"] = (close.shift(-1) > close).astype(int)
-    df["target_t2"] = (close.shift(-2) > close).astype(int)
-    df["target_t3"] = (close.shift(-3) > close).astype(int)
-    df["target_t5"] = (close.shift(-5) > close).astype(int)
+    # Keep unavailable future labels as NaN so training can drop them correctly.
+    future_t1 = close.shift(-1)
+    future_t2 = close.shift(-2)
+    future_t3 = close.shift(-3)
+    future_t5 = close.shift(-5)
+    df["target_t1"] = np.where(future_t1.notna(), (future_t1 > close).astype(int), np.nan)
+    df["target_t2"] = np.where(future_t2.notna(), (future_t2 > close).astype(int), np.nan)
+    df["target_t3"] = np.where(future_t3.notna(), (future_t3 > close).astype(int), np.nan)
+    df["target_t5"] = np.where(future_t5.notna(), (future_t5 > close).astype(int), np.nan)
 
     # Drop rows without enough history
     df = df.dropna(subset=["ret_10d", "rsi_14"]).reset_index(drop=True)

@@ -111,7 +111,6 @@ def range_analysis_local(req: RangeAnalysisRequest):
             high_price = max(r["high"] for r in ohlc_rows)
             low_price = min(r["low"] for r in ohlc_rows)
             price_change_pct = round((close_price - open_price) / open_price * 100, 2)
-            total_volume = sum(r["volume"] for r in ohlc_rows)
 
             cur.execute(
                 """SELECT nr.title, l1.sentiment, l1.chinese_summary,
@@ -120,7 +119,7 @@ def range_analysis_local(req: RangeAnalysisRequest):
                    JOIN layer1_results l1 ON na.news_id = l1.news_id AND l1.symbol = na.symbol
                    JOIN news_raw nr ON na.news_id = nr.id
                    WHERE na.symbol = %s AND na.trade_date >= %s AND na.trade_date <= %s
-                     AND l1.relevance IN ('high', 'medium', 'relevant')
+                     AND l1.relevance = 'relevant'
                    ORDER BY ABS(COALESCE(na.ret_t0, 0)) DESC
                    LIMIT 50""",
                 (symbol, req.start_date, req.end_date),
@@ -143,7 +142,7 @@ def range_analysis_local(req: RangeAnalysisRequest):
     key_events = []
     for r in news_rows[:8]:
         title = r["title"][:80] if r["title"] else ""
-        ret = f" (当日 {r['ret_t0']*100:+.1f}%)" if r["ret_t0"] else ""
+        ret = f" (当日 {r['ret_t0'] * 100:+.1f}%)" if r["ret_t0"] is not None else ""
         key_events.append(f"[{r['trade_date']}] {title}{ret}")
 
     bullish = [r["chinese_summary"] or r["title"][:60] for r in pos[:5] if r["chinese_summary"] or r["title"]]

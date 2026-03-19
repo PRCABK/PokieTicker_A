@@ -41,7 +41,7 @@ interface Props {
 function pct(v: number | null) {
   if (v === null || v === undefined) return <span style={{ color: '#666' }}>-</span>;
   const pctVal = v * 100;
-  const color = pctVal > 0 ? '#26a69a' : pctVal < 0 ? '#ef5350' : '#888';
+  const color = pctVal > 0 ? '#ef5350' : pctVal < 0 ? '#26a69a' : '#888';
   return <span style={{ color, fontWeight: 600 }}>{pctVal > 0 ? '+' : ''}{pctVal.toFixed(2)}%</span>;
 }
 
@@ -66,20 +66,20 @@ export default function SimilarNewsPanel({ newsId, symbol, onClose }: Props) {
   return (
     <div className="news-panel similar-panel">
       <div className="news-panel-header">
-        <h2>Similar Articles</h2>
-        <button className="range-clear-btn" onClick={onClose}>Close</button>
+        <h2>相似新闻</h2>
+        <button className="range-clear-btn" onClick={onClose}>关闭</button>
       </div>
 
       {loading ? (
-        <div className="news-empty">Finding similar articles...</div>
+        <div className="news-empty">正在寻找相似新闻...</div>
       ) : !data || data.similar_articles.length === 0 ? (
-        <div className="news-empty">No similar articles found</div>
+        <div className="news-empty">未找到相似新闻</div>
       ) : (
         <div className="news-list">
           {/* Query article */}
           {data.query?.title && (
             <div className="similar-query-card">
-              <div className="similar-query-label">Query Article</div>
+              <div className="similar-query-label">查询新闻</div>
               <div className="similar-query-title">{data.query.title}</div>
               <div className="similar-query-meta">
                 {data.query.symbol} · {data.query.trade_date || 'N/A'}
@@ -90,27 +90,27 @@ export default function SimilarNewsPanel({ newsId, symbol, onClose }: Props) {
           {/* Stats card */}
           <div className="similar-stats-card">
             <div className="similar-stats-header">
-              {data.stats.total} similar across {data.stats.cross_ticker_count} tickers
+              共 {data.stats.total} 篇相似新闻，覆盖 {data.stats.cross_ticker_count} 只股票
             </div>
             <div className="similar-stats-grid">
               <div className="similar-stat">
-                <span className="similar-stat-label">T+1 positive</span>
-                <span className={`similar-stat-val ${(data.stats.positive_t1_pct ?? 0) > 50 ? 'up' : 'down'}`}>
+                <span className="similar-stat-label">T+1 上涨占比</span>
+                <span className={`similar-stat-val ${data.stats.positive_t1_pct == null ? 'neutral' : ((data.stats.positive_t1_pct ?? 0) > 50 ? 'up' : 'down')}`}>
                   {statPct(data.stats.positive_t1_pct)}
                 </span>
               </div>
               <div className="similar-stat">
-                <span className="similar-stat-label">T+5 positive</span>
-                <span className={`similar-stat-val ${(data.stats.positive_t5_pct ?? 0) > 50 ? 'up' : 'down'}`}>
+                <span className="similar-stat-label">T+5 上涨占比</span>
+                <span className={`similar-stat-val ${data.stats.positive_t5_pct == null ? 'neutral' : ((data.stats.positive_t5_pct ?? 0) > 50 ? 'up' : 'down')}`}>
                   {statPct(data.stats.positive_t5_pct)}
                 </span>
               </div>
               <div className="similar-stat">
-                <span className="similar-stat-label">Avg T+1</span>
+                <span className="similar-stat-label">T+1 平均收益</span>
                 <span className="similar-stat-val">{pct(data.stats.avg_ret_t1)}</span>
               </div>
               <div className="similar-stat">
-                <span className="similar-stat-label">Avg T+5</span>
+                <span className="similar-stat-label">T+5 平均收益</span>
                 <span className="similar-stat-val">{pct(data.stats.avg_ret_t5)}</span>
               </div>
             </div>
@@ -121,7 +121,7 @@ export default function SimilarNewsPanel({ newsId, symbol, onClose }: Props) {
             <div key={`${art.news_id}-${art.symbol}`} className="news-card similar-card">
               <div className="similar-card-top">
                 <span className="similar-ticker-badge">{art.symbol}</span>
-                <span className="similar-score">{(art.similarity * 100).toFixed(0)}% match</span>
+                <span className="similar-score">相似度 {(art.similarity * 100).toFixed(0)}%</span>
               </div>
               <div className="news-title similar-title">{art.title}</div>
               <div className="news-card-footer">
