@@ -2,14 +2,15 @@
 .env
 config.yml
 
-# Database (pokieticker.db.gz included in repo for quick start)
+# Runtime database artifacts
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
 *.db.backup
 
-# ML models (models.tar.gz included in repo for quick start)
+# Runtime model artifacts
+models.tar.gz
 *.joblib
 *.pkl
 *.pickle

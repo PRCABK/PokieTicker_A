@@ -42,26 +42,43 @@ interface Props {
 
 function pct(v: number | null) {
   if (v === null || v === undefined) return '-';
-  const p = v * 100;
-  const color = p > 0 ? '#ef5350' : p < 0 ? '#26a69a' : '#888';
-  return <span style={{ color, fontWeight: 600 }}>{p > 0 ? '+' : ''}{p.toFixed(2)}%</span>;
+  const color = v > 0 ? '#ef5350' : v < 0 ? '#26a69a' : '#888';
+  return <span style={{ color, fontWeight: 600 }}>{v > 0 ? '+' : ''}{v.toFixed(2)}%</span>;
 }
 
 export default function RangeNewsPanel({ symbol, startDate, endDate, priceChange, onClose, onAskAI }: Props) {
-  const [data, setData] = useState<RangeNewsResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [showAll, setShowAll] = useState(false);
+  const requestKey = `${symbol}|${startDate}|${endDate}`;
+  const [result, setResult] = useState<{
+    requestKey: string;
+    data: RangeNewsResponse | null;
+    error: string | null;
+  } | null>(null);
+  const [showAllState, setShowAllState] = useState<{ requestKey: string; value: boolean }>({
+    requestKey,
+    value: false,
+  });
 
   useEffect(() => {
-    setLoading(true);
-    setData(null);
-    setShowAll(false);
+    let cancelled = false;
     axios
-      .get(`/api/news/${symbol}/range?start=${startDate}&end=${endDate}`)
-      .then((res) => setData(res.data))
-      .catch(console.error)
-      .finally(() => setLoading(false));
-  }, [symbol, startDate, endDate]);
+      .get<RangeNewsResponse>(`/api/news/${symbol}/range?start=${startDate}&end=${endDate}`)
+      .then((res) => {
+        if (cancelled) return;
+        setResult({ requestKey, data: res.data, error: null });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setResult({ requestKey, data: null, error: '加载区间新闻失败' });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [symbol, startDate, endDate, requestKey]);
+
+  const loading = result?.requestKey !== requestKey;
+  const data = result?.requestKey === requestKey ? result.data : null;
+  const error = result?.requestKey === requestKey ? result.error : null;
+  const showAll = showAllState.requestKey === requestKey ? showAllState.value : false;
 
   const change = priceChange ?? 0;
   const isUp = change >= 0;
@@ -88,6 +105,8 @@ export default function RangeNewsPanel({ symbol, startDate, endDate, priceChange
             <span>正在加载区间新闻...</span>
           </div>
         </div>
+      ) : error ? (
+        <div className="news-empty">{error}</div>
       ) : !data || data.total === 0 ? (
         <div className="news-empty">该区间内无新闻</div>
       ) : (
@@ -121,7 +140,7 @@ export default function RangeNewsPanel({ symbol, startDate, endDate, priceChange
             <div className="range-news-all">
               <button
                 className="range-news-all-btn"
-                onClick={() => setShowAll(!showAll)}
+                onClick={() => setShowAllState({ requestKey, value: !showAll })}
               >
                 {showAll ? '收起' : '展开'} 全部 {data.total} 篇新闻
                 <span className="range-news-all-arrow">{showAll ? '▲' : '▼'}</span>

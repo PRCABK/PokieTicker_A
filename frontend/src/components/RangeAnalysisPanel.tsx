@@ -32,19 +32,18 @@ interface Props {
 }
 
 export default function RangeAnalysisPanel({ symbol, startDate, endDate, question, onClear }: Props) {
-  const [data, setData] = useState<RangeAnalysis | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const requestKey = `${symbol}|${startDate}|${endDate}|${question ?? ''}`;
+  const [result, setResult] = useState<{
+    requestKey: string;
+    data: RangeAnalysis | null;
+    error: string | null;
+  } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
-
-    setLoading(true);
-    setError(null);
-    setData(null);
 
     axios
       .post<RangeAnalysis>(
@@ -53,21 +52,25 @@ export default function RangeAnalysisPanel({ symbol, startDate, endDate, questio
         { signal: controller.signal }
       )
       .then((res) => {
+        if (controller.signal.aborted) return;
         if (res.data.error) {
-          setError(res.data.error);
+          setResult({ requestKey, data: null, error: res.data.error });
         } else {
-          setData(res.data);
+          setResult({ requestKey, data: res.data, error: null });
         }
       })
       .catch((err) => {
         if (!axios.isCancel(err)) {
-          setError('分析失败');
+          setResult({ requestKey, data: null, error: '分析失败' });
         }
-      })
-      .finally(() => setLoading(false));
+      });
 
     return () => controller.abort();
-  }, [symbol, startDate, endDate, question]);
+  }, [symbol, startDate, endDate, question, requestKey]);
+
+  const loading = result?.requestKey !== requestKey;
+  const data = result?.requestKey === requestKey ? result.data : null;
+  const error = result?.requestKey === requestKey ? result.error : null;
 
   const changePct = data?.price_change_pct ?? 0;
   const isUp = changePct >= 0;

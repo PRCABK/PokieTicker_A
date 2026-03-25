@@ -6,6 +6,23 @@ from backend.database import get_conn
 router = APIRouter()
 
 
+RETURN_FIELDS = ("ret_t0", "ret_t1", "ret_t3", "ret_t5", "ret_t10")
+
+
+def _percent_or_none(value):
+    if value is None:
+        return None
+    return round(float(value) * 100, 2)
+
+
+def _normalize_return_fields(row: dict) -> dict:
+    normalized = dict(row)
+    for field in RETURN_FIELDS:
+        if field in normalized:
+            normalized[field] = _percent_or_none(normalized[field])
+    return normalized
+
+
 @router.get("/{symbol}")
 def get_news_for_date(
     symbol: str,
@@ -49,7 +66,7 @@ def get_news_for_date(
             rows = cur.fetchall()
     finally:
         conn.close()
-    return list(rows)
+    return [_normalize_return_fields(row) for row in rows]
 
 
 @router.get("/{symbol}/range")
@@ -81,7 +98,7 @@ def get_news_for_range(
     finally:
         conn.close()
 
-    articles = list(rows)
+    articles = [_normalize_return_fields(row) for row in rows]
 
     top_bullish = sorted(
         [a for a in articles if a.get("sentiment") == "positive" and a.get("ret_t0") is not None],
@@ -131,7 +148,7 @@ def get_news_particles(symbol: str):
             "s": r["sentiment"],
             "r": r["relevance"],
             "t": (r["title"] or "")[:80],
-            "rt1": r["ret_t1"],
+            "rt1": _percent_or_none(r["ret_t1"]),
         }
         for r in rows
     ]

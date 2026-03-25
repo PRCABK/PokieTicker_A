@@ -6,12 +6,80 @@ from datetime import datetime
 
 import numpy as np
 import joblib
-from xgboost import XGBClassifier
 
 from backend.ml.features import build_features, build_features_multi, FEATURE_COLS
 
 MODELS_DIR = Path(__file__).parent / "models"
 MODELS_DIR.mkdir(exist_ok=True)
+MIN_SINGLE_SYMBOL_ROWS = 60
+MIN_UNIFIED_ROWS = 100
+MIN_SPLIT_ROWS = 10
+MIN_MINORITY_CLASS_ROWS = 5
+
+
+def _prepare_training_dataset(
+    df,
+    *,
+    target_col: str,
+    min_rows: int,
+    sort_cols: list[str],
+) -> tuple[dict | None, str | None]:
+    """Validate training inputs before fitting a model."""
+    if df.empty:
+        return None, "No feature data available"
+
+    working = df.dropna(subset=[target_col]).sort_values(sort_cols, kind="mergesort").reset_index(drop=True)
+    if len(working) < min_rows:
+        return None, f"Not enough data ({len(working)} rows)"
+
+    feature_frame = working[FEATURE_COLS].replace([np.inf, -np.inf], np.nan)
+    empty_feature_cols = [col for col in FEATURE_COLS if feature_frame[col].notna().sum() == 0]
+    if empty_feature_cols:
+        cols = ", ".join(empty_feature_cols[:3])
+        return None, f"Invalid features: no usable values for {cols}"
+
+    informative_feature_count = sum(
+        1 for col in FEATURE_COLS if feature_frame[col].nunique(dropna=True) > 1
+    )
+    if informative_feature_count == 0:
+        return None, "Invalid features: all feature columns are constant or empty"
+
+    nonempty_rows = ~feature_frame.isna().all(axis=1)
+    dropped_rows = int((~nonempty_rows).sum())
+    if dropped_rows:
+        working = working.loc[nonempty_rows].reset_index(drop=True)
+        feature_frame = feature_frame.loc[nonempty_rows].reset_index(drop=True)
+        if len(working) < min_rows:
+            return None, f"Not enough valid data after dropping empty feature rows ({len(working)} rows)"
+
+    split_idx = int(len(working) * 0.8)
+    test_size = len(working) - split_idx
+    if split_idx < MIN_SPLIT_ROWS or test_size < MIN_SPLIT_ROWS:
+        return None, f"Time-series split is too small (train={split_idx}, test={test_size})"
+
+    y = working[target_col].astype(int).to_numpy()
+    class_counts = np.bincount(y, minlength=2)
+    if np.count_nonzero(class_counts) < 2:
+        return None, "Target has only one class"
+    if int(class_counts.min()) < MIN_MINORITY_CLASS_ROWS:
+        return None, f"Target minority class is too small ({int(class_counts.min())} rows)"
+
+    train_counts = np.bincount(y[:split_idx], minlength=2)
+    if np.count_nonzero(train_counts) < 2:
+        return None, "Training split has only one class"
+
+    test_counts = np.bincount(y[split_idx:], minlength=2)
+    if np.count_nonzero(test_counts) < 2:
+        return None, "Test split has only one class"
+
+    return {
+        "df": working,
+        "X": feature_frame.to_numpy(dtype=np.float64),
+        "y": y,
+        "dates": working["trade_date"].dt.strftime("%Y-%m-%d").tolist(),
+        "symbols": working["symbol"].tolist() if "symbol" in working.columns else None,
+        "split_idx": split_idx,
+    }, None
 
 
 def train(symbol: str, horizon: str = "t1") -> dict:
@@ -19,18 +87,22 @@ def train(symbol: str, horizon: str = "t1") -> dict:
     target_col = f"target_{horizon}"
 
     df = build_features(symbol)
-    if df.empty or len(df) < 60:
-        return {"error": f"Not enough data for {symbol} ({len(df)} rows)"}
+    prepared, error = _prepare_training_dataset(
+        df,
+        target_col=target_col,
+        min_rows=MIN_SINGLE_SYMBOL_ROWS,
+        sort_cols=["trade_date"],
+    )
+    if error:
+        return {"error": f"{symbol}: {error}"}
 
-    # Drop rows where target is NaN (last few days)
-    df = df.dropna(subset=[target_col]).reset_index(drop=True)
-
-    X = df[FEATURE_COLS].values
-    y = df[target_col].values
-    dates = df["trade_date"].dt.strftime("%Y-%m-%d").tolist()
+    from xgboost import XGBClassifier
 
     # Time-series split: last 20% for test
-    split_idx = int(len(df) * 0.8)
+    X = prepared["X"]
+    y = prepared["y"]
+    dates = prepared["dates"]
+    split_idx = prepared["split_idx"]
     X_train, X_test = X[:split_idx], X[split_idx:]
     y_train, y_test = y[:split_idx], y[split_idx:]
 
@@ -92,18 +164,24 @@ def train_unified(horizon: str = "t1", symbols: list[str] | None = None) -> dict
     target_col = f"target_{horizon}"
 
     df = build_features_multi(symbols)
-    if df.empty or len(df) < 100:
-        return {"error": f"Not enough combined data ({len(df)} rows)"}
+    prepared, error = _prepare_training_dataset(
+        df,
+        target_col=target_col,
+        min_rows=MIN_UNIFIED_ROWS,
+        sort_cols=["trade_date", "symbol"],
+    )
+    if error:
+        return {"error": error}
 
-    df = df.dropna(subset=[target_col]).reset_index(drop=True)
+    from xgboost import XGBClassifier
 
-    X = df[FEATURE_COLS].values
-    y = df[target_col].values
-    dates = df["trade_date"].dt.strftime("%Y-%m-%d").tolist()
-    syms = df["symbol"].tolist()
+    X = prepared["X"]
+    y = prepared["y"]
+    dates = prepared["dates"]
+    syms = prepared["symbols"] or []
 
-    # Time-series split: sort by date, last 20% for test
-    split_idx = int(len(df) * 0.8)
+    # Time-series split on globally sorted chronological rows.
+    split_idx = prepared["split_idx"]
     X_train, X_test = X[:split_idx], X[split_idx:]
     y_train, y_test = y[:split_idx], y[split_idx:]
 

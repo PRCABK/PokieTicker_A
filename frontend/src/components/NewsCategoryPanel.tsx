@@ -35,7 +35,10 @@ type SentimentFilter = 'all' | 'positive' | 'negative';
 
 export default function NewsCategoryPanel({ symbol, refreshKey, activeCategory, onCategoryChange }: Props) {
   const [categories, setCategories] = useState<Record<string, CategoryInfo>>({});
-  const [sentimentFilter, setSentimentFilter] = useState<SentimentFilter>('all');
+  const [sentimentSelection, setSentimentSelection] = useState<{ category: string | null; filter: SentimentFilter }>({
+    category: null,
+    filter: 'all',
+  });
 
   useEffect(() => {
     if (!symbol) return;
@@ -45,19 +48,18 @@ export default function NewsCategoryPanel({ symbol, refreshKey, activeCategory, 
       .catch(() => setCategories({}));
   }, [symbol, refreshKey]);
 
-  // Reset sentiment sub-filter when category changes
-  useEffect(() => {
-    setSentimentFilter('all');
-  }, [activeCategory]);
-
   const keys = Object.keys(categories).filter((k) => categories[k].count > 0);
   if (keys.length === 0) return null;
+
+  const sentimentFilter: SentimentFilter = activeCategory && sentimentSelection.category === activeCategory
+    ? sentimentSelection.filter
+    : 'all';
 
   function handleSentimentClick(filter: SentimentFilter) {
     if (!activeCategory) return;
     const cat = categories[activeCategory];
     const meta = CATEGORY_META[activeCategory] || { color: '#667eea' };
-    setSentimentFilter(filter);
+    setSentimentSelection({ category: activeCategory, filter });
     let ids: string[];
     let color: string;
     if (filter === 'positive') {
@@ -93,9 +95,10 @@ export default function NewsCategoryPanel({ symbol, refreshKey, activeCategory, 
               } as React.CSSProperties}
               onClick={() => {
                 if (isActive) {
+                  setSentimentSelection({ category: null, filter: 'all' });
                   onCategoryChange(null, []);
                 } else {
-                  setSentimentFilter('all');
+                  setSentimentSelection({ category: key, filter: 'all' });
                   onCategoryChange(key, cat.article_ids, meta.color);
                 }
               }}

@@ -1,4 +1,5 @@
 import logging
+from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
@@ -17,6 +18,7 @@ from backend.pipeline.alignment import align_news_for_symbol
 import json
 
 router = APIRouter()
+PIPELINE_TASK_TABLE = "pipeline_tasks"
 
 
 class FetchRequest(BaseModel):
@@ -34,18 +36,118 @@ class TrainRequest(BaseModel):
     symbol: str
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _task_tracking_is_available(cur) -> bool:
+    cur.execute(
+        """SELECT 1
+           FROM information_schema.tables
+           WHERE table_schema = %s AND table_name = %s
+           LIMIT 1""",
+        (settings.mysql_database, PIPELINE_TASK_TABLE),
+    )
+    return cur.fetchone() is not None
+
+
+def _create_pipeline_task(symbol: str, task_type: str, params: Optional[dict] = None, message: str = "Queued") -> str | None:
+    task_id = str(uuid4())
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if not _task_tracking_is_available(cur):
+                return None
+            now = _utc_now_iso()
+            cur.execute(
+                f"""INSERT INTO {PIPELINE_TASK_TABLE}
+                    (task_id, symbol, task_type, status, message, params_json, requested_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                (task_id, symbol, task_type, "queued", message, json.dumps(params or {}), now),
+            )
+        conn.commit()
+        return task_id
+    finally:
+        conn.close()
+
+
+def _update_pipeline_task(
+    task_id: Optional[str],
+    *,
+    status: str,
+    message: Optional[str] = None,
+    error_text: Optional[str] = None,
+    mark_started: bool = False,
+    mark_finished: bool = False,
+):
+    if not task_id:
+        return
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if not _task_tracking_is_available(cur):
+                return
+            fields = ["status = %s"]
+            params: list[object] = [status]
+            if message is not None:
+                fields.append("message = %s")
+                params.append(message)
+            if error_text is not None:
+                fields.append("error_text = %s")
+                params.append(error_text[:4000])
+            if mark_started:
+                fields.append("started_at = %s")
+                params.append(_utc_now_iso())
+            if mark_finished:
+                fields.append("finished_at = %s")
+                params.append(_utc_now_iso())
+            params.append(task_id)
+            cur.execute(
+                f"UPDATE {PIPELINE_TASK_TABLE} SET {', '.join(fields)} WHERE task_id = %s",
+                params,
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _load_latest_pipeline_task(cur, symbol: str) -> tuple[bool, Optional[dict]]:
+    if not _task_tracking_is_available(cur):
+        return False, None
+    cur.execute(
+        f"""SELECT task_id, task_type, status, message, error_text,
+                   requested_at, started_at, finished_at
+            FROM {PIPELINE_TASK_TABLE}
+            WHERE symbol = %s
+            ORDER BY requested_at DESC
+            LIMIT 1""",
+        (symbol,),
+    )
+    task = cur.fetchone()
+    return True, task
+
+
 @router.post("/train")
 def trigger_train(req: TrainRequest, background_tasks: BackgroundTasks):
     """Train XGBoost models (t1 + t3 + t5) for a symbol."""
     symbol = req.symbol.upper()
-    background_tasks.add_task(_do_train, symbol)
-    return {"symbol": symbol, "status": "training_started"}
+    task_id = _create_pipeline_task(symbol, "train", {"symbol": symbol}, "Queued model training")
+    background_tasks.add_task(_do_train, symbol, task_id)
+    return {
+        "symbol": symbol,
+        "status": "training_started",
+        "task_id": task_id,
+        "task_tracking_enabled": task_id is not None,
+    }
 
 
-def _do_train(symbol: str):
+def _do_train(symbol: str, task_id: Optional[str] = None):
     """Background model training. Auto-fetches data if insufficient."""
     from backend.ml.model import train
     from backend.ml.features import build_features
+
+    _update_pipeline_task(task_id, status="running", message="Training models", mark_started=True)
 
     # Check if we have enough data
     df = build_features(symbol)
@@ -74,7 +176,9 @@ def _do_train(symbol: str):
         df = build_features(symbol)
         if df.empty or len(df) < 60:
             logger.warning("Train %s: still only %d rows after fetch, skipping", symbol, len(df))
-            return {"error": f"Not enough data ({len(df)} rows) even after fetching"}
+            message = f"Not enough data ({len(df)} rows) even after fetching"
+            _update_pipeline_task(task_id, status="failed", message=message, error_text=message, mark_finished=True)
+            return {"error": message}
 
     results = {}
     for horizon in ["t1", "t3", "t5"]:
@@ -88,6 +192,25 @@ def _do_train(symbol: str):
         except Exception:
             logger.exception("Train error %s/%s", symbol, horizon)
             results[horizon] = {"error": "training exception"}
+
+    failures = [h for h, result in results.items() if "error" in result]
+    failure_details = [f"{h}: {results[h]['error']}" for h in failures]
+    if failures and len(failures) == len(results):
+        message = f"Training failed for all horizons: {', '.join(failures)}"
+        error_text = "; ".join(failure_details)[:4000]
+        _update_pipeline_task(task_id, status="failed", message=message, error_text=error_text, mark_finished=True)
+    elif failures:
+        message = f"Training partially succeeded; failed horizons: {', '.join(failures)}"
+        error_text = "; ".join(failure_details)[:4000]
+        _update_pipeline_task(
+            task_id,
+            status="partial_success",
+            message=message,
+            error_text=error_text,
+            mark_finished=True,
+        )
+    else:
+        _update_pipeline_task(task_id, status="success", message="Training completed", mark_finished=True)
     return results
 
 
@@ -130,8 +253,20 @@ def trigger_fetch(req: FetchRequest, background_tasks: BackgroundTasks):
                         pending = int((pending_row or {}).get("c") or 0)
                         if pending > 0:
                             logger.info("Symbol %s up-to-date but has %d pending Layer1 items, processing...", symbol, pending)
-                            background_tasks.add_task(_do_process_only, symbol)
-                            return {"symbol": symbol, "status": "processing_started", "pending": pending}
+                            task_id = _create_pipeline_task(
+                                symbol,
+                                "process",
+                                {"symbol": symbol, "pending": pending},
+                                "Queued processing for pending Layer1 items",
+                            )
+                            background_tasks.add_task(_do_process_only, symbol, task_id)
+                            return {
+                                "symbol": symbol,
+                                "status": "processing_started",
+                                "pending": pending,
+                                "task_id": task_id,
+                                "task_tracking_enabled": task_id is not None,
+                            }
                         return {"symbol": symbol, "status": "up_to_date"}
                     start = (datetime.fromisoformat(last_str) + timedelta(days=1)).date().isoformat()
                 else:
@@ -140,8 +275,21 @@ def trigger_fetch(req: FetchRequest, background_tasks: BackgroundTasks):
             conn.close()
 
     logger.info("Triggering fetch for %s (%s ~ %s)", symbol, start, end)
-    background_tasks.add_task(_do_fetch, symbol, start, end)
-    return {"symbol": symbol, "status": "fetch_started", "start": start, "end": end}
+    task_id = _create_pipeline_task(
+        symbol,
+        "fetch",
+        {"symbol": symbol, "start": start, "end": end},
+        f"Queued fetch for {start} ~ {end}",
+    )
+    background_tasks.add_task(_do_fetch, symbol, start, end, True, task_id)
+    return {
+        "symbol": symbol,
+        "status": "fetch_started",
+        "start": start,
+        "end": end,
+        "task_id": task_id,
+        "task_tracking_enabled": task_id is not None,
+    }
 
 
 @router.get("/status/{symbol}")
@@ -204,6 +352,8 @@ def get_pipeline_status(symbol: str):
                 (symbol,),
             )
             pending_layer1 = int((cur.fetchone() or {}).get("c") or 0)
+
+            task_tracking_enabled, latest_task = _load_latest_pipeline_task(cur, symbol)
     finally:
         conn.close()
 
@@ -221,6 +371,8 @@ def get_pipeline_status(symbol: str):
         "layer1_count": layer1_count,
         "pending_layer1": pending_layer1,
         "deepseek_enabled": bool(settings.deepseek_api_key),
+        "task_tracking_enabled": task_tracking_enabled,
+        "latest_task": latest_task,
     }
 
 
@@ -260,17 +412,27 @@ def _run_post_fetch_pipeline(symbol: str, auto_train: bool = True):
             logger.exception("Auto-train error for %s", symbol)
 
 
-def _do_process_only(symbol: str):
+def _do_process_only(symbol: str, task_id: Optional[str] = None):
     """Run alignment + Layer0/1 (+ optional training) without fetching remote data."""
+    _update_pipeline_task(task_id, status="running", message="Running alignment and analysis", mark_started=True)
     try:
         _run_post_fetch_pipeline(symbol, auto_train=True)
         logger.info("Process-only pipeline complete for %s", symbol)
+        _update_pipeline_task(task_id, status="success", message="Processing completed", mark_finished=True)
     except Exception:
         logger.exception("Process-only pipeline error for %s", symbol)
+        _update_pipeline_task(
+            task_id,
+            status="failed",
+            message="Processing failed",
+            error_text=f"Process-only pipeline error for {symbol}",
+            mark_finished=True,
+        )
 
 
-def _do_fetch(symbol: str, start: str, end: str, auto_train: bool = True):
+def _do_fetch(symbol: str, start: str, end: str, auto_train: bool = True, task_id: Optional[str] = None):
     """Background fetch of OHLC + news data."""
+    _update_pipeline_task(task_id, status="running", message="Fetching OHLC and news", mark_started=True)
     try:
         # Ensure ticker exists in DB first
         conn = get_conn()
@@ -290,6 +452,7 @@ def _do_fetch(symbol: str, start: str, end: str, auto_train: bool = True):
         logger.info("Fetched %d OHLC rows for %s", len(ohlc_rows), symbol)
 
         conn = get_conn()
+        news_error: Optional[str] = None
         try:
             with conn.cursor() as cur:
                 for row in ohlc_rows:
@@ -340,17 +503,29 @@ def _do_fetch(symbol: str, start: str, end: str, auto_train: bool = True):
                         (end, symbol),
                     )
                 conn.commit()
-            except Exception:
+            except Exception as exc:
                 logger.exception("News fetch error for symbol=%s", symbol)
                 conn.rollback()
+                news_error = str(exc)
         finally:
             conn.close()
+
+        if news_error:
+            raise RuntimeError(f"News fetch failed for {symbol}: {news_error}")
 
         _run_post_fetch_pipeline(symbol, auto_train=auto_train)
 
         logger.info("Fetch pipeline complete for %s", symbol)
-    except Exception:
+        _update_pipeline_task(task_id, status="success", message="Fetch completed", mark_finished=True)
+    except Exception as exc:
         logger.exception("Fetch error for %s", symbol)
+        _update_pipeline_task(
+            task_id,
+            status="failed",
+            message="Fetch failed",
+            error_text=str(exc),
+            mark_finished=True,
+        )
 
 
 @router.post("/process")

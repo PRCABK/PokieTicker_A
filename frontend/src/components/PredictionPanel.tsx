@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import axios from 'axios';
 
 interface Driver {
@@ -88,6 +88,17 @@ interface Forecast {
 interface Props {
   symbol: string;
   refreshKey?: number;
+}
+
+interface PipelineTask {
+  task_id: string;
+  status: string;
+  message: string | null;
+  error_text: string | null;
+}
+
+interface PipelineStatusResponse {
+  latest_task?: PipelineTask | null;
 }
 
 function extractKeywords(headlines: Headline[]): string[] {
@@ -282,7 +293,7 @@ export default function PredictionPanel({ symbol, refreshKey }: Props) {
   const [deepLoading, setDeepLoading] = useState<string | null>(null);
   const [deepResults, setDeepResults] = useState<Record<string, DeepAnalysis>>({});
 
-  async function fetchForecast(window: number): Promise<Forecast | null> {
+  const fetchForecast = useCallback(async (window: number): Promise<Forecast | null> => {
     try {
       const res = await axios.get(`/api/predict/${symbol}/forecast?window=${window}`);
       return res.data as Forecast;
@@ -292,14 +303,21 @@ export default function PredictionPanel({ symbol, refreshKey }: Props) {
       }
       throw err;
     }
-  }
+  }, [symbol]);
+
+  const loadForecasts = useCallback(async () => {
+    const [f7, f30] = await Promise.all([fetchForecast(7), fetchForecast(30)]);
+    setForecast7(f7);
+    setForecast30(f30);
+    return { f7, f30 };
+  }, [fetchForecast]);
 
   useEffect(() => {
     if (!symbol) return;
     setLoading(true);
     setError('');
-    Promise.all([fetchForecast(7), fetchForecast(30)])
-      .then(([f7, f30]) => {
+    loadForecasts()
+      .then(({ f7, f30 }) => {
         setForecast7(f7);
         setForecast30(f30);
         if (!f7 && !f30) setError('No model available');
@@ -310,7 +328,7 @@ export default function PredictionPanel({ symbol, refreshKey }: Props) {
         setError('Forecast request failed');
       })
       .finally(() => setLoading(false));
-  }, [symbol, refreshKey]);
+  }, [symbol, refreshKey, loadForecasts]);
 
   const keywords = useMemo(() => {
     const fc = forecast7 || forecast30;
@@ -348,34 +366,80 @@ export default function PredictionPanel({ symbol, refreshKey }: Props) {
     setTraining(true);
     setError('');
     axios.post('/api/pipeline/train', { symbol })
-      .then(() => {
-        // Poll until model is ready (data fetch + training may take a while)
-        let attempts = 0;
-        const maxAttempts = 30; // up to ~2.5 minutes
-        const poll = () => {
-          attempts++;
-          Promise.all([fetchForecast(7), fetchForecast(30)]).then(([f7, f30]) => {
-            const stillNoModel = (f7?.no_model && f30?.no_model) || (f7?.no_model && !f30) || (!f7 && f30?.no_model) || (!f7 && !f30);
-            if (!stillNoModel) {
-              // Model is ready
-              setForecast7(f7);
-              setForecast30(f30);
+      .then((res) => {
+        const taskId = typeof res.data?.task_id === 'string' ? res.data.task_id : null;
+        const trackingEnabled = Boolean(res.data?.task_tracking_enabled) && taskId !== null;
+
+        // Fallback for older backends without persistent task tracking.
+        if (!trackingEnabled) {
+          // Poll until model is ready (data fetch + training may take a while)
+          let attempts = 0;
+          const maxAttempts = 30; // up to ~2.5 minutes
+          const poll = () => {
+            attempts++;
+            loadForecasts().then(({ f7, f30 }) => {
+              const stillNoModel = (f7?.no_model && f30?.no_model) || (f7?.no_model && !f30) || (!f7 && f30?.no_model) || (!f7 && !f30);
+              if (!stillNoModel) {
+                setLoading(false);
+                setTraining(false);
+              } else if (attempts < maxAttempts) {
+                setTimeout(poll, 5000);
+              } else {
+                setError('训练超时，数据可能仍在抓取中，请稍后刷新');
+                setLoading(false);
+                setTraining(false);
+              }
+            }).catch(() => {
+              setError('Forecast request failed');
               setLoading(false);
               setTraining(false);
-            } else if (attempts < maxAttempts) {
+            });
+          };
+          setTimeout(poll, 5000);
+          return;
+        }
+
+        let attempts = 0;
+        const maxAttempts = 36; // up to ~3 minutes
+        const poll = async () => {
+          attempts++;
+          try {
+            const statusRes = await axios.get<PipelineStatusResponse>(`/api/pipeline/status/${symbol}`);
+            const latestTask = statusRes.data.latest_task;
+
+            if (latestTask && latestTask.task_id === taskId) {
+              if (latestTask.status === 'failed') {
+                setError(latestTask.error_text || latestTask.message || '训练失败');
+                setLoading(false);
+                setTraining(false);
+                return;
+              }
+
+              if (latestTask.status === 'success' || latestTask.status === 'partial_success') {
+                const { f7, f30 } = await loadForecasts();
+                if (!f7 && !f30) {
+                  setError(latestTask.message || '训练完成，但暂无可用模型');
+                } else {
+                  setError('');
+                }
+                setLoading(false);
+                setTraining(false);
+                return;
+              }
+            }
+
+            if (attempts < maxAttempts) {
               setTimeout(poll, 5000);
             } else {
-              setForecast7(f7);
-              setForecast30(f30);
-              setError('训练超时，数据可能仍在抓取中，请稍后刷新');
+              setError('训练超时，状态未知，请稍后刷新');
               setLoading(false);
               setTraining(false);
             }
-          }).catch(() => {
-            setError('Forecast request failed');
+          } catch {
+            setError('训练状态查询失败');
             setLoading(false);
             setTraining(false);
-          });
+          }
         };
         setTimeout(poll, 5000);
       })
@@ -392,7 +456,7 @@ export default function PredictionPanel({ symbol, refreshKey }: Props) {
         <div className="pred-header">
           <span className="pred-title">AI 预测</span>
           <span className="pred-no-model">{error === 'No model available' ? '该股票暂无预测模型' : error || '暂无数据'}</span>
-          {error === 'No model available' && (
+          {(error === 'No model available' || error.includes('暂无可用模型')) && (
             <button className="pred-train-btn" disabled={loading} onClick={handleTrain}>
               训练模型
             </button>

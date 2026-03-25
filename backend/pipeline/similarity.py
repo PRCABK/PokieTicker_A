@@ -27,6 +27,15 @@ _news_ids: Optional[List[str]] = None
 _symbols: Optional[List[str]] = None
 
 
+RETURN_FIELDS = ("ret_t0", "ret_t1", "ret_t3", "ret_t5", "ret_t10")
+
+
+def _ratio_to_percent(value):
+    if value is None:
+        return None
+    return round(float(value) * 100, 2)
+
+
 def _needs_rebuild() -> bool:
     if _matrix is None:
         return True
@@ -228,11 +237,11 @@ def find_similar(news_id: str, symbol: str, top_k: int = 20) -> Dict[str, Any]:
             "trade_date": row["trade_date"],
             "similarity": round(score, 3),
             "sentiment": row["sentiment"],
-            "ret_t0": row["ret_t0"],
-            "ret_t1": row["ret_t1"],
-            "ret_t3": row["ret_t3"],
-            "ret_t5": row["ret_t5"],
-            "ret_t10": row["ret_t10"],
+            "ret_t0": _ratio_to_percent(row["ret_t0"]),
+            "ret_t1": _ratio_to_percent(row["ret_t1"]),
+            "ret_t3": _ratio_to_percent(row["ret_t3"]),
+            "ret_t5": _ratio_to_percent(row["ret_t5"]),
+            "ret_t10": _ratio_to_percent(row["ret_t10"]),
         }
         similar_articles.append(article)
         ticker_set.add(row["symbol"])
@@ -248,10 +257,10 @@ def find_similar(news_id: str, symbol: str, top_k: int = 20) -> Dict[str, Any]:
         "cross_ticker_count": len(ticker_set),
         "positive_t1_pct": round(sum(1 for v in ret_t1_vals if v > 0) / len(ret_t1_vals) * 100, 1) if ret_t1_vals else None,
         "positive_t5_pct": round(sum(1 for v in ret_t5_vals if v > 0) / len(ret_t5_vals) * 100, 1) if ret_t5_vals else None,
-        "avg_ret_t1": round(sum(ret_t1_vals) / len(ret_t1_vals), 4) if ret_t1_vals else None,
-        "avg_ret_t5": round(sum(ret_t5_vals) / len(ret_t5_vals), 4) if ret_t5_vals else None,
-        "median_ret_t1": round(float(np.median(ret_t1_vals)), 4) if ret_t1_vals else None,
-        "median_ret_t5": round(float(np.median(ret_t5_vals)), 4) if ret_t5_vals else None,
+        "avg_ret_t1": _ratio_to_percent(sum(ret_t1_vals) / len(ret_t1_vals)) if ret_t1_vals else None,
+        "avg_ret_t5": _ratio_to_percent(sum(ret_t5_vals) / len(ret_t5_vals)) if ret_t5_vals else None,
+        "median_ret_t1": _ratio_to_percent(float(np.median(ret_t1_vals))) if ret_t1_vals else None,
+        "median_ret_t5": _ratio_to_percent(float(np.median(ret_t5_vals))) if ret_t5_vals else None,
     }
 
     query_info = {

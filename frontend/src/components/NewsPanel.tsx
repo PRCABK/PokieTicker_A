@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import axios from 'axios';
 
 interface NewsItem {
@@ -45,9 +45,8 @@ function sortBySentiment(items: NewsItem[]): NewsItem[] {
 
 function pct(v: number | null) {
   if (v === null || v === undefined) return '-';
-  const pctVal = v * 100;
-  const color = pctVal > 0 ? '#ef5350' : pctVal < 0 ? '#26a69a' : '#888';
-  return <span style={{ color, fontWeight: 600 }}>{pctVal > 0 ? '+' : ''}{pctVal.toFixed(2)}%</span>;
+  const color = v > 0 ? '#ef5350' : v < 0 ? '#26a69a' : '#888';
+  return <span style={{ color, fontWeight: 600 }}>{v > 0 ? '+' : ''}{v.toFixed(2)}%</span>;
 }
 
 export default function NewsPanel({
@@ -61,53 +60,51 @@ export default function NewsPanel({
   highlightedCategoryIds,
   categoryFilterActive,
 }: Props) {
-  const [news, setNews] = useState<NewsItem[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [displayDate, setDisplayDate] = useState<string | null>(null);
+  const [fetchState, setFetchState] = useState<{ cacheKey: string | null; news: NewsItem[] }>({
+    cacheKey: null,
+    news: [],
+  });
+  const [cache, setCache] = useState<Record<string, NewsItem[]>>({});
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const cacheRef = useRef<Map<string, NewsItem[]>>(new Map());
   const listRef = useRef<HTMLDivElement>(null);
+  const currentCacheKey = symbol && hoveredDate ? `${symbol}_${hoveredDate}_${refreshKey ?? 0}` : null;
+  const cachedNews = currentCacheKey ? cache[currentCacheKey] ?? null : null;
+  const displayDate = currentCacheKey ? hoveredDate : null;
+  const news = useMemo(() => {
+    if (!currentCacheKey) return [];
+    if (fetchState.cacheKey === currentCacheKey) return fetchState.news;
+    return cachedNews ?? [];
+  }, [cachedNews, currentCacheKey, fetchState.cacheKey, fetchState.news]);
+  const loading = Boolean(currentCacheKey && !cachedNews && fetchState.cacheKey !== currentCacheKey);
 
   // Debounced fetch on hover
   useEffect(() => {
-    if (!symbol || !hoveredDate) return;
-    if (isLocked && displayDate === hoveredDate) return;
+    if (!currentCacheKey || !hoveredDate) return;
+    if (isLocked && fetchState.cacheKey === currentCacheKey) return;
+    if (cache[currentCacheKey]) return;
 
     if (debounceRef.current) clearTimeout(debounceRef.current);
 
+    let cancelled = false;
     debounceRef.current = setTimeout(() => {
-      const cacheKey = `${symbol}_${hoveredDate}`;
-      const cached = cacheRef.current.get(cacheKey);
-      if (cached) {
-        setNews(sortBySentiment(cached));
-        setDisplayDate(hoveredDate);
-        return;
-      }
-
-      setLoading(true);
       axios
         .get(`/api/news/${symbol}?date=${hoveredDate}`)
         .then((res) => {
-          cacheRef.current.set(cacheKey, res.data);
-          setNews(sortBySentiment(res.data));
-          setDisplayDate(hoveredDate);
+          if (cancelled) return;
+          const sorted = sortBySentiment(res.data);
+          setCache((prev) => ({ ...prev, [currentCacheKey]: sorted }));
+          setFetchState({ cacheKey: currentCacheKey, news: sorted });
         })
-        .catch(() => {})
-        .finally(() => setLoading(false));
+        .catch(() => {
+          if (cancelled) return;
+          setFetchState({ cacheKey: currentCacheKey, news: [] });
+        });
     }, 120);
-  }, [symbol, hoveredDate, refreshKey, isLocked, displayDate]);
-
-  // Clear cache + state on symbol change
-  useEffect(() => {
-    cacheRef.current.clear();
-    setNews([]);
-    setDisplayDate(null);
-  }, [symbol]);
-
-  // Clear cache when upstream pipeline refreshes
-  useEffect(() => {
-    cacheRef.current.clear();
-  }, [refreshKey]);
+    return () => {
+      cancelled = true;
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [cache, currentCacheKey, hoveredDate, symbol, isLocked, fetchState.cacheKey]);
 
   // Auto-scroll to highlighted article
   useEffect(() => {

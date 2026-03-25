@@ -102,6 +102,22 @@ CREATE TABLE IF NOT EXISTS news_aligned (
 
 CREATE INDEX idx_news_aligned_symbol_date ON news_aligned(symbol, trade_date);
 
+-- 管道任务状态表
+CREATE TABLE IF NOT EXISTS pipeline_tasks (
+    task_id        VARCHAR(64) PRIMARY KEY,
+    symbol         VARCHAR(20) NOT NULL,
+    task_type      VARCHAR(20) NOT NULL COMMENT 'fetch/process/train',
+    status         VARCHAR(30) NOT NULL COMMENT 'queued/running/success/failed/partial_success',
+    message        TEXT COMMENT '当前状态说明',
+    error_text     TEXT COMMENT '失败详情',
+    params_json    TEXT COMMENT '任务参数JSON',
+    requested_at   VARCHAR(40) NOT NULL,
+    started_at     VARCHAR(40) COMMENT '开始时间',
+    finished_at    VARCHAR(40) COMMENT '结束时间'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE INDEX idx_pipeline_tasks_symbol_requested ON pipeline_tasks(symbol, requested_at);
+
 -- 批处理任务表
 CREATE TABLE IF NOT EXISTS batch_jobs (
     batch_id      VARCHAR(100) PRIMARY KEY,

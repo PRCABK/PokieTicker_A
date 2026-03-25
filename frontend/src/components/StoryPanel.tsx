@@ -16,8 +16,14 @@ export default function StoryPanel({ symbol }: Props) {
     try {
       const res = await axios.post('/api/analysis/story', { symbol });
       setStory(res.data.story);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || err.message || 'Failed to generate story');
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        setError(String(err.response?.data?.detail || err.message || 'Failed to generate story'));
+      } else if (err instanceof Error) {
+        setError(err.message);
+      } else {
+        setError('Failed to generate story');
+      }
     } finally {
       setLoading(false);
     }

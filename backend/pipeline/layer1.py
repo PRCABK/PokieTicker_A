@@ -8,6 +8,7 @@ Strategy:
 """
 
 import json
+import logging
 import re
 from typing import List, Dict, Any
 
@@ -16,8 +17,11 @@ from openai import OpenAI
 from backend.config import settings
 from backend.database import get_conn
 
+logger = logging.getLogger(__name__)
+
 MODEL = settings.deepseek_model
-BATCH_SIZE = 50  # articles per API call
+BATCH_SIZE = 20  # start smaller to reduce timeout risk
+MIN_BATCH_SIZE = 5
 MAX_OUTPUT_TOKENS = 4096  # enough for 50 articles (~70 tokens each)
 
 # Comprehensive keyword mappings for extraction
@@ -142,6 +146,17 @@ def process_batch_group(
             max_tokens=MAX_OUTPUT_TOKENS,
             messages=[{"role": "user", "content": prompt}],
         )
+        usage = getattr(response, "usage", None)
+        logger.info(
+            "DeepSeek Layer1 success: symbol=%s batch=%d model=%s response_id=%s prompt_tokens=%s completion_tokens=%s total_tokens=%s",
+            symbol,
+            len(articles),
+            MODEL,
+            getattr(response, "id", None),
+            getattr(usage, "prompt_tokens", None),
+            getattr(usage, "completion_tokens", None),
+            getattr(usage, "total_tokens", None),
+        )
 
         text = response.choices[0].message.content if response.choices else "[]"
 
@@ -203,6 +218,40 @@ def process_batch_group(
     return stats
 
 
+def _process_batch_with_fallback(
+    symbol: str,
+    articles: List[Dict[str, Any]],
+    batch_size: int,
+) -> Dict[str, int]:
+    """Process a batch; if the whole request fails, split into smaller batches."""
+    if not articles:
+        return {"processed": 0, "relevant": 0, "irrelevant": 0, "errors": 0, "api_calls": 0}
+
+    stats = process_batch_group(symbol, articles)
+    total = len(articles)
+    succeeded = stats["processed"] > 0
+    failed_all = stats["errors"] >= total and not succeeded
+
+    if failed_all and total > MIN_BATCH_SIZE and batch_size > MIN_BATCH_SIZE:
+        next_batch = max(MIN_BATCH_SIZE, min(batch_size // 2, total - 1))
+        merged = {"processed": 0, "relevant": 0, "irrelevant": 0, "errors": 0, "api_calls": 1}
+        for i in range(0, total, next_batch):
+            child = _process_batch_with_fallback(
+                symbol,
+                articles[i:i + next_batch],
+                next_batch,
+            )
+            merged["processed"] += child["processed"]
+            merged["relevant"] += child["relevant"]
+            merged["irrelevant"] += child["irrelevant"]
+            merged["errors"] += child["errors"]
+            merged["api_calls"] += child["api_calls"]
+        return merged
+
+    stats["api_calls"] = 1
+    return stats
+
+
 def run_layer1(symbol: str, max_articles: int = 10000) -> Dict[str, Any]:
     """Run Layer 1 on all pending articles for a symbol.
 
@@ -219,13 +268,13 @@ def run_layer1(symbol: str, max_articles: int = 10000) -> Dict[str, Any]:
 
     for i in range(0, len(articles), BATCH_SIZE):
         chunk = articles[i : i + BATCH_SIZE]
-        stats = process_batch_group(symbol, chunk)
+        stats = _process_batch_with_fallback(symbol, chunk, BATCH_SIZE)
 
         total_stats["processed"] += stats["processed"]
         total_stats["relevant"] += stats["relevant"]
         total_stats["irrelevant"] += stats["irrelevant"]
         total_stats["errors"] += stats["errors"]
-        total_stats["api_calls"] += 1
+        total_stats["api_calls"] += stats["api_calls"]
 
         print(f"  [{symbol}] Batch {total_stats['api_calls']}: "
               f"{stats['processed']}/{len(chunk)} ok, {stats['relevant']} relevant")

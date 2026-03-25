@@ -39,19 +39,33 @@ interface Props {
 }
 
 export default function SimilarDaysPanel({ symbol, date, onClose }: Props) {
-  const [data, setData] = useState<SimilarDaysData | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const requestKey = `${symbol}|${date}`;
+  const [result, setResult] = useState<{
+    requestKey: string;
+    data: SimilarDaysData | null;
+    error: string;
+  } | null>(null);
 
   useEffect(() => {
-    setLoading(true);
-    setError('');
+    let cancelled = false;
     axios
-      .get(`/api/predict/${symbol}/similar-days?date=${date}`)
-      .then((res) => setData(res.data))
-      .catch(() => setError('寻找相似交易日失败'))
-      .finally(() => setLoading(false));
-  }, [symbol, date]);
+      .get<SimilarDaysData>(`/api/predict/${symbol}/similar-days?date=${date}`)
+      .then((res) => {
+        if (cancelled) return;
+        setResult({ requestKey, data: res.data, error: '' });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setResult({ requestKey, data: null, error: '寻找相似交易日失败' });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [symbol, date, requestKey]);
+
+  const loading = result?.requestKey !== requestKey;
+  const data = result?.requestKey === requestKey ? result.data : null;
+  const error = result?.requestKey === requestKey ? result.error : '';
 
   return (
     <div className="news-panel">
@@ -93,7 +107,7 @@ export default function SimilarDaysPanel({ symbol, date, onClose }: Props) {
               <div className="sim-feat">
                 <span className="sim-feat-label">前一日涨跌</span>
                 <span className={`sim-feat-val ${(data.target_features.ret_1d ?? 0) >= 0 ? 'up' : 'down'}`}>
-                  {((data.target_features.ret_1d ?? 0) * 100).toFixed(1)}%
+                  {(data.target_features.ret_1d ?? 0).toFixed(1)}%
                 </span>
               </div>
             </div>

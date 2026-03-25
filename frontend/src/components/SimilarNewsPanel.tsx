@@ -40,9 +40,8 @@ interface Props {
 
 function pct(v: number | null) {
   if (v === null || v === undefined) return <span style={{ color: '#666' }}>-</span>;
-  const pctVal = v * 100;
-  const color = pctVal > 0 ? '#ef5350' : pctVal < 0 ? '#26a69a' : '#888';
-  return <span style={{ color, fontWeight: 600 }}>{pctVal > 0 ? '+' : ''}{pctVal.toFixed(2)}%</span>;
+  const color = v > 0 ? '#ef5350' : v < 0 ? '#26a69a' : '#888';
+  return <span style={{ color, fontWeight: 600 }}>{v > 0 ? '+' : ''}{v.toFixed(2)}%</span>;
 }
 
 function statPct(v: number | null) {
@@ -51,17 +50,33 @@ function statPct(v: number | null) {
 }
 
 export default function SimilarNewsPanel({ newsId, symbol, onClose }: Props) {
-  const [data, setData] = useState<SimilarResponse | null>(null);
-  const [loading, setLoading] = useState(false);
+  const requestKey = `${symbol}|${newsId}`;
+  const [result, setResult] = useState<{
+    requestKey: string;
+    data: SimilarResponse | null;
+    error: string | null;
+  } | null>(null);
 
   useEffect(() => {
-    setLoading(true);
+    let cancelled = false;
     axios
       .post<SimilarResponse>('/api/analysis/similar', { news_id: newsId, symbol, top_k: 20 })
-      .then((res) => setData(res.data))
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, [newsId, symbol]);
+      .then((res) => {
+        if (cancelled) return;
+        setResult({ requestKey, data: res.data, error: null });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setResult({ requestKey, data: null, error: '寻找相似新闻失败' });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [newsId, symbol, requestKey]);
+
+  const loading = result?.requestKey !== requestKey;
+  const data = result?.requestKey === requestKey ? result.data : null;
+  const error = result?.requestKey === requestKey ? result.error : null;
 
   return (
     <div className="news-panel similar-panel">
@@ -72,6 +87,8 @@ export default function SimilarNewsPanel({ newsId, symbol, onClose }: Props) {
 
       {loading ? (
         <div className="news-empty">正在寻找相似新闻...</div>
+      ) : error ? (
+        <div className="news-empty">{error}</div>
       ) : !data || data.similar_articles.length === 0 ? (
         <div className="news-empty">未找到相似新闻</div>
       ) : (

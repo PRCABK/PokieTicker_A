@@ -10,6 +10,12 @@ def _to_date_str(v) -> str:
     return str(v)[:10] if v is not None else ""
 
 
+def _ratio_to_percent(value) -> float | None:
+    if value is None or pd.isna(value):
+        return None
+    return round(float(value) * 100, 2)
+
+
 def find_similar_days(symbol: str, date: str, top_k: int = 10) -> dict:
     """Find days with the most similar feature vectors to the target date."""
     df = build_features(symbol)
@@ -135,7 +141,7 @@ def find_similar_days(symbol: str, date: str, top_k: int = 10) -> dict:
             "similarity": round(sim_score, 4),
             "sentiment_score": round(float(row["sentiment_score"]), 4),
             "n_articles": int(row["n_articles"]),
-            "ret_1d": round(float(row["ret_1d"]), 4) if pd.notna(row["ret_1d"]) else None,
+            "ret_1d": _ratio_to_percent(row["ret_1d"]),
             "rsi_14": round(float(row["rsi_14"]), 1),
             "ret_t1_after": round(ret_t1, 2) if ret_t1 is not None else None,
             "ret_t5_after": round(ret_t5, 2) if ret_t5 is not None else None,

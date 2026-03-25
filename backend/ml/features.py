@@ -173,7 +173,8 @@ def build_features_multi(symbols: list[str] | None = None) -> pd.DataFrame:
 
     if not frames:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+    combined = pd.concat(frames, ignore_index=True)
+    return combined.sort_values(["trade_date", "symbol"], kind="mergesort").reset_index(drop=True)
 
 
 FEATURE_COLS = [

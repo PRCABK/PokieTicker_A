@@ -69,7 +69,7 @@ function getSentimentColor(s: string | null): string {
 function getParticleRadius(relevance: string | null, rt1: number | null): number {
   let r = 2;
   if (relevance === 'relevant') r += 0.8;
-  if (rt1 !== null) r += Math.min(Math.abs(rt1) * 20, 1.5);
+  if (rt1 !== null) r += Math.min(Math.abs(rt1) * 0.2, 1.5);
   return Math.min(r, 4.5);
 }
 
@@ -83,6 +83,14 @@ interface PlacedParticle extends Particle {
   radius: number;
   color: string;
   alpha: number;
+}
+
+function formatAxisDate(value: Date | d3.NumberValue): string {
+  return d3.timeFormat('%b %y')(value instanceof Date ? value : new Date(value.valueOf()));
+}
+
+function isQuadtreeLeafNode<T>(node: d3.QuadtreeInternalNode<T> | d3.QuadtreeLeaf<T>): node is d3.QuadtreeLeaf<T> {
+  return 'data' in node;
 }
 
 export default function CandlestickChart({ symbol, refreshKey, lockedNewsId, highlightedArticleIds, highlightColor, onHover, onRangeSelect, onArticleSelect, onDayClick }: Props) {
@@ -100,21 +108,6 @@ export default function CandlestickChart({ symbol, refreshKey, lockedNewsId, hig
   const highlightedIdsRef = useRef<Set<string> | null>(null);
   const highlightColorRef = useRef<string | null>(null);
   const marginRef = useRef({ top: 16, right: 40, bottom: 24, left: 48 });
-
-  // Keep refs in sync with props
-  useEffect(() => {
-    lockedNewsIdRef.current = lockedNewsId ?? null;
-    drawParticles(hoveredParticleRef.current);
-  }, [lockedNewsId]);
-
-  useEffect(() => {
-    highlightedIdsRef.current =
-      highlightedArticleIds !== null && highlightedArticleIds !== undefined
-        ? new Set(highlightedArticleIds)
-        : null;
-    highlightColorRef.current = highlightColor ?? null;
-    drawParticles(hoveredParticleRef.current);
-  }, [highlightedArticleIds, highlightColor]);
 
   const drawParticles = useCallback((highlight: PlacedParticle | null = null) => {
     const canvas = canvasRef.current;
@@ -195,22 +188,7 @@ export default function CandlestickChart({ symbol, refreshKey, lockedNewsId, hig
     ctx.shadowBlur = 0;
   }, []);
 
-  useEffect(() => {
-    if (!symbol) return;
-    setLoading(true);
-
-    Promise.all([
-      axios.get<OHLCRow[]>(`/api/stocks/${symbol}/ohlc`),
-      axios.get<Particle[]>(`/api/news/${symbol}/particles`),
-    ])
-      .then(([ohlcRes, particlesRes]) => {
-        drawChart(ohlcRes.data, particlesRes.data);
-      })
-      .catch((err) => console.error('Chart error:', err))
-      .finally(() => setLoading(false));
-  }, [symbol, refreshKey]);
-
-  function drawChart(rawData: OHLCRow[], particles: Particle[]) {
+  const drawChart = useCallback((rawData: OHLCRow[], particles: Particle[]) => {
     const svg = d3.select(svgRef.current);
     svg.selectAll('*').remove();
 
@@ -272,7 +250,7 @@ export default function CandlestickChart({ symbol, refreshKey, lockedNewsId, hig
     // X Axis
     g.append('g')
       .attr('transform', `translate(0,${height})`)
-      .call(d3.axisBottom(x).ticks(8).tickFormat(d3.timeFormat('%b %y') as any))
+      .call(d3.axisBottom(x).ticks(8).tickFormat(formatAxisDate))
       .selectAll('text')
       .style('font-size', '12px')
       .style('fill', '#555');
@@ -441,16 +419,16 @@ export default function CandlestickChart({ symbol, refreshKey, lockedNewsId, hig
       const locked = lockedNewsIdRef.current;
 
       qt.visit((node, x0, y0, x1, y1) => {
-        if (!('data' in node)) {
+        if (!isQuadtreeLeafNode(node)) {
           return x0 > mouseX + searchRadius || x1 < mouseX - searchRadius ||
                  y0 > mouseY + searchRadius || y1 < mouseY - searchRadius;
         }
-        let leaf: typeof node | undefined = node;
+        let leaf: d3.QuadtreeLeaf<PlacedParticle> | undefined = node;
         while (leaf) {
           const p = leaf.data;
           // Skip particles hidden by category filter
           if (hlSet != null && !hlSet.has(p.id) && p.id !== locked) {
-            leaf = (leaf as any).next;
+            leaf = leaf.next;
             continue;
           }
           const dx = p.px - mouseX;
@@ -460,7 +438,7 @@ export default function CandlestickChart({ symbol, refreshKey, lockedNewsId, hig
             closestDist = dist;
             closest = p;
           }
-          leaf = (leaf as any).next;
+          leaf = leaf.next;
         }
         return false;
       });
@@ -569,7 +547,7 @@ export default function CandlestickChart({ symbol, refreshKey, lockedNewsId, hig
           const tooltip = tooltipRef.current;
           if (tooltip) {
             if (hit) {
-              const retStr = hit.rt1 !== null ? `${(hit.rt1 * 100).toFixed(2)}%` : '-';
+              const retStr = hit.rt1 !== null ? `${hit.rt1.toFixed(2)}%` : '-';
               const retColor = hit.rt1 !== null ? (hit.rt1 >= 0 ? '#ff5252' : '#00e676') : '#555';
               tooltip.innerHTML = `
                 <div class="pt-title">${hit.t}</div>
@@ -605,7 +583,37 @@ export default function CandlestickChart({ symbol, refreshKey, lockedNewsId, hig
         const tooltip = tooltipRef.current;
         if (tooltip) tooltip.style.display = 'none';
       });
-  }
+  }, [drawParticles, onArticleSelect, onDayClick, onHover, onRangeSelect]);
+
+  // Keep refs in sync with props
+  useEffect(() => {
+    lockedNewsIdRef.current = lockedNewsId ?? null;
+    drawParticles(hoveredParticleRef.current);
+  }, [lockedNewsId, drawParticles]);
+
+  useEffect(() => {
+    highlightedIdsRef.current =
+      highlightedArticleIds !== null && highlightedArticleIds !== undefined
+        ? new Set(highlightedArticleIds)
+        : null;
+    highlightColorRef.current = highlightColor ?? null;
+    drawParticles(hoveredParticleRef.current);
+  }, [highlightedArticleIds, highlightColor, drawParticles]);
+
+  useEffect(() => {
+    if (!symbol) return;
+    setLoading(true);
+
+    Promise.all([
+      axios.get<OHLCRow[]>(`/api/stocks/${symbol}/ohlc`),
+      axios.get<Particle[]>(`/api/news/${symbol}/particles`),
+    ])
+      .then(([ohlcRes, particlesRes]) => {
+        drawChart(ohlcRes.data, particlesRes.data);
+      })
+      .catch((err) => console.error('Chart error:', err))
+      .finally(() => setLoading(false));
+  }, [symbol, refreshKey, drawChart]);
 
   return (
     <div ref={containerRef} className="chart-container">

@@ -25,6 +25,29 @@ interface ArticleSelection {
   date: string;
 }
 
+interface TickerRow {
+  symbol: string;
+  last_ohlc_fetch?: string | null;
+}
+
+interface PipelineTask {
+  task_id: string;
+  task_type: string;
+  status: string;
+  message: string | null;
+  error_text: string | null;
+}
+
+interface PipelineStatusResponse {
+  last_news_fetch?: string | null;
+  ohlc_count?: number;
+  pending_alignment?: number;
+  pending_layer1?: number;
+  deepseek_enabled?: boolean;
+  task_tracking_enabled?: boolean;
+  latest_task?: PipelineTask | null;
+}
+
 function App() {
   const [activeTickers, setActiveTickers] = useState<string[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState('');
@@ -54,21 +77,24 @@ function App() {
   // Chart area ref for popup positioning
   const chartAreaRef = useRef<HTMLDivElement>(null);
   const [chartRect, setChartRect] = useState<DOMRect | undefined>(undefined);
+  const selectedSymbolRef = useRef('');
+  const selectionRequestRef = useRef(0);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [pipelineError, setPipelineError] = useState<string | null>(null);
+
+  const clearPoll = useCallback((intervalId?: ReturnType<typeof setInterval> | null) => {
+    const target = intervalId ?? pollRef.current;
+    if (target) {
+      clearInterval(target);
+    }
+    if (!intervalId || pollRef.current === intervalId) {
+      pollRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
-    axios
-      .get('/api/stocks')
-      .then((res) => {
-        const tickers = res.data
-          .filter((t: any) => t.last_ohlc_fetch)
-          .map((t: any) => t.symbol);
-        setActiveTickers(tickers);
-        if (tickers.length > 0 && !selectedSymbol) {
-          setSelectedSymbol(tickers[0]);
-        }
-      })
-      .catch(console.error);
-  }, []);
+    selectedSymbolRef.current = selectedSymbol;
+  }, [selectedSymbol]);
 
   // Update chartRect when range is selected (for popup positioning)
   useEffect(() => {
@@ -152,18 +178,22 @@ function App() {
 
   // Refresh key: incrementing this triggers child components to re-fetch data
   const [refreshKey, setRefreshKey] = useState(0);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     return () => {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
+      selectionRequestRef.current += 1;
+      clearPoll();
     };
-  }, []);
+  }, [clearPoll]);
 
-  function handleSelectSymbol(symbol: string) {
+  const handleSelectSymbol = useCallback((symbol: string) => {
+    if (symbol === selectedSymbolRef.current) {
+      return;
+    }
+
+    const requestId = selectionRequestRef.current + 1;
+    selectionRequestRef.current = requestId;
+    selectedSymbolRef.current = symbol;
     setSelectedSymbol(symbol);
     setHoveredDate(null);
     setHoveredOhlc(null);
@@ -176,19 +206,23 @@ function App() {
     setActiveCategory(null);
     setActiveCategoryIds([]);
     setActiveCategoryColor(null);
+    setPipelineError(null);
 
     // Clear any existing poll
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
+    clearPoll();
 
     // Trigger background news fetch whenever a stock is selected
     axios.post('/api/pipeline/fetch', { symbol }).then((res) => {
+      if (selectionRequestRef.current !== requestId || selectedSymbolRef.current !== symbol) {
+        return;
+      }
+
       const fetchStatus = res.data?.status as string | undefined;
       const fetchEnd = typeof res.data?.end === 'string' ? String(res.data.end).slice(0, 10) : null;
+      const fetchTaskId = typeof res.data?.task_id === 'string' ? res.data.task_id : null;
 
       if (fetchStatus === 'up_to_date') {
+        setPipelineError(null);
         setRefreshKey((k) => k + 1);
         return;
       }
@@ -196,17 +230,27 @@ function App() {
       // Poll pipeline status (every 3s, max 120s) until fetch + Layer1 are done.
       let attempts = 0;
       let ohlcReady = false;
-      pollRef.current = setInterval(() => {
+      const intervalId = setInterval(() => {
+        if (selectionRequestRef.current !== requestId || selectedSymbolRef.current !== symbol) {
+          clearPoll(intervalId);
+          return;
+        }
+
         attempts++;
         if (attempts > 40) {
-          if (pollRef.current) clearInterval(pollRef.current);
-          pollRef.current = null;
+          clearPoll(intervalId);
           setRefreshKey((k) => k + 1);
           return;
         }
 
-        axios.get(`/api/pipeline/status/${symbol}`).then((r) => {
+        axios.get<PipelineStatusResponse>(`/api/pipeline/status/${symbol}`).then((r) => {
+          if (selectionRequestRef.current !== requestId || selectedSymbolRef.current !== symbol) {
+            clearPoll(intervalId);
+            return;
+          }
+
           const status = r.data || {};
+          const latestTask = status.latest_task;
           const ohlcCount = Number(status.ohlc_count ?? 0);
           const pendingAlignment = Number(status.pending_alignment ?? 0);
           const pendingLayer1 = Number(status.pending_layer1 ?? 0);
@@ -214,10 +258,25 @@ function App() {
           const lastNewsFetch = typeof status.last_news_fetch === 'string'
             ? String(status.last_news_fetch).slice(0, 10)
             : null;
+          const taskTrackingEnabled = Boolean(status.task_tracking_enabled);
 
           if (!ohlcReady && ohlcCount > 0) {
             ohlcReady = true;
             setRefreshKey((k) => k + 1);
+          }
+
+          if (taskTrackingEnabled && fetchTaskId && latestTask && latestTask.task_id === fetchTaskId) {
+            if (latestTask.status === 'failed') {
+              setPipelineError(latestTask.error_text || latestTask.message || '数据同步失败');
+              clearPoll(intervalId);
+              return;
+            }
+            if (latestTask.status === 'success' || latestTask.status === 'partial_success') {
+              setPipelineError(null);
+              setRefreshKey((k) => k + 1);
+              clearPoll(intervalId);
+              return;
+            }
           }
 
           const fetchDone = !fetchEnd || (lastNewsFetch !== null && lastNewsFetch >= fetchEnd);
@@ -225,14 +284,37 @@ function App() {
           const layer1Done = !deepseekEnabled || pendingLayer1 === 0;
 
           if (fetchDone && alignedDone && layer1Done) {
+            setPipelineError(null);
             setRefreshKey((k) => k + 1);
-            if (pollRef.current) clearInterval(pollRef.current);
-            pollRef.current = null;
+            clearPoll(intervalId);
           }
         }).catch(() => {});
       }, 3000);
-    }).catch(() => {});
-  }
+      pollRef.current = intervalId;
+    }).catch(() => {
+      setPipelineError('触发数据同步失败');
+    });
+  }, [clearPoll]);
+
+  useEffect(() => {
+    let cancelled = false;
+    axios
+      .get<TickerRow[]>('/api/stocks')
+      .then((res) => {
+        if (cancelled) return;
+        const tickers = res.data
+          .filter((t) => t.last_ohlc_fetch)
+          .map((t) => t.symbol);
+        setActiveTickers(tickers);
+        if (tickers.length > 0 && !selectedSymbolRef.current) {
+          handleSelectSymbol(tickers[0]);
+        }
+      })
+      .catch(console.error);
+    return () => {
+      cancelled = true;
+    };
+  }, [handleSelectSymbol]);
 
   function handleAddTicker(symbol: string) {
     if (!activeTickers.includes(symbol)) {
@@ -358,6 +440,22 @@ function App() {
       </header>
 
       <main className="app-main">
+        {pipelineError && (
+          <div
+            style={{
+              gridColumn: '1 / -1',
+              margin: '0 0 12px',
+              padding: '10px 14px',
+              border: '1px solid rgba(239, 83, 80, 0.4)',
+              borderRadius: 10,
+              background: 'rgba(239, 83, 80, 0.08)',
+              color: '#ff8a80',
+              fontSize: 14,
+            }}
+          >
+            后台同步失败：{pipelineError}
+          </div>
+        )}
         <div className="chart-area" ref={chartAreaRef}>
           {selectedSymbol ? (
             <>

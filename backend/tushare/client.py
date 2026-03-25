@@ -6,6 +6,7 @@
 import hashlib
 import time
 from datetime import datetime, timedelta
+from threading import Lock
 from typing import Any, Dict, List, Optional
 
 import tushare as ts
@@ -14,6 +15,10 @@ from backend.config import settings
 
 # 初始化 Tushare Pro API
 _pro: Optional[ts.pro_api] = None
+_stock_basic_records_cache: Optional[list[dict[str, str]]] = None
+_stock_basic_records_fetched_at = 0.0
+_stock_basic_cache_lock = Lock()
+STOCK_BASIC_CACHE_TTL_SECONDS = 6 * 60 * 60
 
 
 def _get_pro() -> ts.pro_api:
@@ -21,6 +26,88 @@ def _get_pro() -> ts.pro_api:
     if _pro is None:
         _pro = ts.pro_api(settings.tushare_token)
     return _pro
+
+
+def _normalize_stock_basic_row(row: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "ts_code": str(row.get("ts_code") or ""),
+        "symbol": str(row.get("symbol") or ""),
+        "name": str(row.get("name") or ""),
+        "industry": str(row.get("industry") or ""),
+    }
+
+
+def _fetch_stock_basic_records() -> Optional[List[Dict[str, str]]]:
+    pro = _get_pro()
+
+    try:
+        df = pro.stock_basic(
+            exchange="",
+            list_status="L",
+            fields="ts_code,symbol,name,area,industry,list_date",
+        )
+    except Exception as e:
+        print(f"  Tushare stock_basic error: {e}")
+        return None
+
+    if df is None or df.empty:
+        return []
+
+    return [_normalize_stock_basic_row(row) for row in df.to_dict("records")]
+
+
+def _get_stock_basic_records(force_refresh: bool = False) -> List[Dict[str, str]]:
+    global _stock_basic_records_cache, _stock_basic_records_fetched_at
+
+    now = time.monotonic()
+    if (
+        not force_refresh
+        and _stock_basic_records_cache is not None
+        and now - _stock_basic_records_fetched_at < STOCK_BASIC_CACHE_TTL_SECONDS
+    ):
+        return [row.copy() for row in _stock_basic_records_cache]
+
+    with _stock_basic_cache_lock:
+        now = time.monotonic()
+        if (
+            not force_refresh
+            and _stock_basic_records_cache is not None
+            and now - _stock_basic_records_fetched_at < STOCK_BASIC_CACHE_TTL_SECONDS
+        ):
+            return [row.copy() for row in _stock_basic_records_cache]
+
+        cached_records = _stock_basic_records_cache
+        records = _fetch_stock_basic_records()
+        if records is None:
+            return [row.copy() for row in cached_records] if cached_records is not None else []
+
+        if records or cached_records is None:
+            _stock_basic_records_cache = records
+            _stock_basic_records_fetched_at = now
+            return [row.copy() for row in records]
+
+        return [row.copy() for row in cached_records]
+
+
+def _match_stock_basic_records(records: List[Dict[str, str]], query: str, limit: int) -> List[Dict[str, str]]:
+    q_upper = query.upper().strip()
+    q_lower = query.lower().strip()
+    matched: List[Dict[str, str]] = []
+
+    for row in records:
+        ts_code = row["ts_code"].upper()
+        symbol = row["symbol"].upper()
+        name = row["name"].lower()
+        if q_upper in ts_code or q_upper in symbol or q_lower in name:
+            matched.append({
+                "symbol": row["ts_code"],
+                "name": row["name"],
+                "sector": row["industry"],
+            })
+            if len(matched) >= limit:
+                break
+
+    return matched
 
 
 def fetch_ohlc(ts_code: str, start: str, end: str) -> List[Dict[str, Any]]:
@@ -191,43 +278,28 @@ def search_tickers(query: str, limit: int = 20) -> List[Dict[str, str]]:
     Returns:
         匹配的股票列表。
     """
-    pro = _get_pro()
-
-    try:
-        # 获取所有股票基本信息
-        df = pro.stock_basic(
-            exchange="",
-            list_status="L",
-            fields="ts_code,symbol,name,area,industry,list_date"
-        )
-    except Exception as e:
-        print(f"  Tushare stock_basic error: {e}")
+    records = _get_stock_basic_records()
+    if not records:
         return []
 
-    if df is None or df.empty:
+    matched = _match_stock_basic_records(records, query, limit)
+    if matched:
+        return matched
+
+    refreshed_records = _get_stock_basic_records(force_refresh=True)
+    if refreshed_records == records:
         return []
-
-    q = query.upper()
-    # 按代码或名称匹配
-    mask = (
-        df["ts_code"].str.contains(q, case=False, na=False) |
-        df["symbol"].str.contains(q, case=False, na=False) |
-        df["name"].str.contains(query, case=False, na=False)
-    )
-    matched = df[mask].head(limit)
-
-    return [
-        {
-            "symbol": row["ts_code"],
-            "name": row["name"],
-            "sector": row.get("industry", ""),
-        }
-        for _, row in matched.iterrows()
-    ]
+    return _match_stock_basic_records(refreshed_records, query, limit)
 
 
 def get_ticker_name(ts_code: str) -> str:
     """根据股票代码获取名称。"""
+    target = ts_code.upper()
+    for force_refresh in (False, True):
+        for row in _get_stock_basic_records(force_refresh=force_refresh):
+            if row["ts_code"].upper() == target:
+                return row["name"]
+
     pro = _get_pro()
     try:
         df = pro.stock_basic(ts_code=ts_code, fields="ts_code,name")

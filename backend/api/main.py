@@ -1,7 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.database import init_db
+from backend.config import settings
+from backend.database import check_db_connection
 from backend.api.routers import stocks, news, analysis, predict, pipeline
 
 app = FastAPI(title="PokieTicker", version="1.0.0")
@@ -19,9 +20,14 @@ app.include_router(news.router, prefix="/api/news", tags=["news"])
 app.include_router(analysis.router, prefix="/api/analysis", tags=["analysis"])
 app.include_router(predict.router, prefix="/api/predict", tags=["predict"])
 app.include_router(pipeline.router, prefix="/api/pipeline", tags=["pipeline"])
+
+
 @app.on_event("startup")
 def startup():
-    init_db()
+    errors = settings.validate_for_startup()
+    if errors:
+        raise RuntimeError("Startup configuration invalid:\n- " + "\n- ".join(errors))
+    check_db_connection()
 
 
 @app.get("/api/health")
