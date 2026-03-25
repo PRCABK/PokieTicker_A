@@ -110,6 +110,15 @@ def _match_stock_basic_records(records: List[Dict[str, str]], query: str, limit:
     return matched
 
 
+def _safe_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def fetch_ohlc(ts_code: str, start: str, end: str) -> List[Dict[str, Any]]:
     """获取A股日线行情数据。
 
@@ -130,12 +139,34 @@ def fetch_ohlc(ts_code: str, start: str, end: str) -> List[Dict[str, Any]]:
     if df is None or df.empty:
         return []
 
-    # 按日期升序排列
-    df = df.sort_values("trade_date").reset_index(drop=True)
+    daily_basic_by_date: Dict[str, Dict[str, Any]] = {}
+    try:
+        basic_df = pro.daily_basic(
+            ts_code=ts_code,
+            start_date=start_ts,
+            end_date=end_ts,
+            fields="ts_code,trade_date,turnover_rate,circ_mv,total_mv",
+        )
+        if basic_df is not None and not basic_df.empty:
+            daily_basic_by_date = {
+                str(row.get("trade_date") or ""): row
+                for row in basic_df.to_dict("records")
+            }
+    except Exception:
+        daily_basic_by_date = {}
+
+    daily_rows = sorted(
+        df.to_dict("records"),
+        key=lambda row: str(row.get("trade_date") or ""),
+    )
 
     rows = []
-    for _, r in df.iterrows():
-        d = f"{r['trade_date'][:4]}-{r['trade_date'][4:6]}-{r['trade_date'][6:8]}"
+    for r in daily_rows:
+        trade_date = str(r.get("trade_date") or "")
+        basic_row = daily_basic_by_date.get(trade_date, {})
+        if len(trade_date) != 8:
+            continue
+        d = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}"
         rows.append({
             "date": d,
             "open": float(r["open"]),
@@ -144,7 +175,42 @@ def fetch_ohlc(ts_code: str, start: str, end: str) -> List[Dict[str, Any]]:
             "close": float(r["close"]),
             "volume": float(r["vol"]),         # 成交量(手)
             "vwap": float(r["amount"]),         # 成交额(千元)，复用vwap字段
+            "turnover_rate": _safe_float(basic_row.get("turnover_rate")),
+            "circ_mv": _safe_float(basic_row.get("circ_mv")),
+            "total_mv": _safe_float(basic_row.get("total_mv")),
             "transactions": None,
+        })
+    return rows
+
+
+def fetch_index_ohlc(ts_code: str, start: str, end: str) -> List[Dict[str, Any]]:
+    """获取A股指数日线数据，用于超额收益基准。"""
+    pro = _get_pro()
+    start_ts = start.replace("-", "")
+    end_ts = end.replace("-", "")
+
+    df = pro.index_daily(ts_code=ts_code, start_date=start_ts, end_date=end_ts)
+    if df is None or df.empty:
+        return []
+
+    daily_rows = sorted(
+        df.to_dict("records"),
+        key=lambda row: str(row.get("trade_date") or ""),
+    )
+
+    rows = []
+    for r in daily_rows:
+        trade_date = str(r.get("trade_date") or "")
+        if len(trade_date) != 8:
+            continue
+        rows.append({
+            "date": f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}",
+            "open": float(r["open"]),
+            "high": float(r["high"]),
+            "low": float(r["low"]),
+            "close": float(r["close"]),
+            "volume": _safe_float(r.get("vol")) or 0.0,
+            "amount": _safe_float(r.get("amount")) or 0.0,
         })
     return rows
 

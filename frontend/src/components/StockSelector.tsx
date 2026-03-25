@@ -5,6 +5,22 @@ interface Ticker {
   symbol: string;
   name: string;
   sector?: string;
+  alias_hits?: string | null;
+}
+
+interface AliasRow {
+  symbol?: string;
+  alias: string;
+  alias_type?: string | null;
+}
+
+interface KeywordSnapshotResponse {
+  symbol: string;
+  name?: string;
+  sector?: string;
+  builtin_keywords: string[];
+  aliases: AliasRow[];
+  keywords: string[];
 }
 
 interface Props {
@@ -29,8 +45,17 @@ export default function StockSelector({ activeTickers, selectedSymbol, onSelect,
   const [results, setResults] = useState<Ticker[]>([]);
   const [showSearch, setShowSearch] = useState(false);
   const [showPanel, setShowPanel] = useState(false);
+  const [showAliasPanel, setShowAliasPanel] = useState(false);
+  const [aliasRows, setAliasRows] = useState<AliasRow[]>([]);
+  const [keywordSnapshot, setKeywordSnapshot] = useState<KeywordSnapshotResponse | null>(null);
+  const [aliasInput, setAliasInput] = useState('');
+  const [aliasTypeInput, setAliasTypeInput] = useState('');
+  const [aliasLoading, setAliasLoading] = useState(false);
+  const [aliasError, setAliasError] = useState('');
+  const [aliasNotice, setAliasNotice] = useState('');
   const searchRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const aliasRef = useRef<HTMLDivElement>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   useEffect(() => {
@@ -41,10 +66,44 @@ export default function StockSelector({ activeTickers, selectedSymbol, onSelect,
       if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
         setShowPanel(false);
       }
+      if (aliasRef.current && !aliasRef.current.contains(e.target as Node)) {
+        setShowAliasPanel(false);
+      }
     }
     document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
   }, []);
+
+  async function loadAliasSnapshot(symbol: string) {
+    setAliasLoading(true);
+    setAliasError('');
+    setAliasNotice('');
+    try {
+      const res = await axios.get<KeywordSnapshotResponse>(`/api/stocks/${symbol}/keywords`);
+      setKeywordSnapshot(res.data);
+      setAliasRows(res.data.aliases || []);
+    } catch {
+      setKeywordSnapshot(null);
+      setAliasRows([]);
+      setAliasError('实体词典加载失败');
+    } finally {
+      setAliasLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (showAliasPanel && selectedSymbol) {
+      void loadAliasSnapshot(selectedSymbol);
+      return;
+    }
+    setKeywordSnapshot(null);
+    setAliasRows([]);
+    setAliasError('');
+    setAliasNotice('');
+  }, [selectedSymbol, showAliasPanel]);
 
   function handleSearch(q: string) {
     setQuery(q);
@@ -78,6 +137,42 @@ export default function StockSelector({ activeTickers, selectedSymbol, onSelect,
   function handleSelectTicker(sym: string) {
     setShowPanel(false);
     onSelect(sym);
+  }
+
+  async function handleSaveAlias() {
+    const alias = aliasInput.trim();
+    if (!selectedSymbol || !alias) return;
+    setAliasLoading(true);
+    setAliasError('');
+    setAliasNotice('');
+    try {
+      await axios.post(`/api/stocks/${selectedSymbol}/aliases`, {
+        alias,
+        alias_type: aliasTypeInput.trim() || null,
+      });
+      setAliasInput('');
+      setAliasTypeInput('');
+      await loadAliasSnapshot(selectedSymbol);
+      setAliasNotice('已保存，Layer1 关键词已刷新。');
+    } catch {
+      setAliasError('保存别名失败');
+      setAliasLoading(false);
+    }
+  }
+
+  async function handleDeleteAlias(alias: string) {
+    if (!selectedSymbol) return;
+    setAliasLoading(true);
+    setAliasError('');
+    setAliasNotice('');
+    try {
+      await axios.delete(`/api/stocks/${selectedSymbol}/aliases`, { params: { alias } });
+      await loadAliasSnapshot(selectedSymbol);
+      setAliasNotice('已删除，Layer1 关键词已刷新。');
+    } catch {
+      setAliasError('删除别名失败');
+      setAliasLoading(false);
+    }
   }
 
   const activeSet = new Set(activeTickers);
@@ -132,6 +227,112 @@ export default function StockSelector({ activeTickers, selectedSymbol, onSelect,
         )}
       </div>
 
+      <div className="ticker-alias-wrapper" ref={aliasRef}>
+        <button
+          className={`ticker-alias-btn ${showAliasPanel ? 'active' : ''}`}
+          disabled={!selectedSymbol}
+          onClick={() => {
+            setShowAliasPanel((v) => !v);
+          }}
+        >
+          词典
+        </button>
+
+        {showAliasPanel && selectedSymbol && (
+          <div className="ticker-alias-panel">
+            <div className="ticker-alias-header">
+              <span className="ticker-alias-title">{selectedSymbol} 实体词典</span>
+              <span className="ticker-alias-count">{aliasRows.length} 条</span>
+            </div>
+
+            {(keywordSnapshot?.name || keywordSnapshot?.sector) && (
+              <div className="ticker-alias-meta">
+                {keywordSnapshot?.name && <span className="ticker-alias-meta-chip">{keywordSnapshot.name}</span>}
+                {keywordSnapshot?.sector && <span className="ticker-alias-meta-chip">{keywordSnapshot.sector}</span>}
+              </div>
+            )}
+
+            <div className="ticker-alias-form">
+              <input
+                type="text"
+                placeholder="新增别名"
+                value={aliasInput}
+                onChange={(e) => setAliasInput(e.target.value)}
+              />
+              <input
+                type="text"
+                placeholder="类型，如简称/产品/子公司"
+                value={aliasTypeInput}
+                onChange={(e) => setAliasTypeInput(e.target.value)}
+              />
+              <button
+                className="ticker-alias-save"
+                disabled={aliasLoading || aliasInput.trim().length === 0}
+                onClick={() => { void handleSaveAlias(); }}
+              >
+                保存
+              </button>
+            </div>
+
+            {aliasError && <div className="ticker-alias-error">{aliasError}</div>}
+            {aliasNotice && <div className="ticker-alias-notice">{aliasNotice}</div>}
+
+            <div className="ticker-alias-list">
+              {aliasLoading && aliasRows.length === 0 ? (
+                <div className="ticker-alias-empty">加载中...</div>
+              ) : aliasRows.length > 0 ? (
+                aliasRows.map((row) => (
+                  <div key={row.alias} className="ticker-alias-item">
+                    <div className="ticker-alias-main">
+                      <span className="ticker-alias-name">{row.alias}</span>
+                      {row.alias_type && <span className="ticker-alias-type">{row.alias_type}</span>}
+                    </div>
+                    <button
+                      className="ticker-alias-delete"
+                      disabled={aliasLoading}
+                      onClick={() => { void handleDeleteAlias(row.alias); }}
+                    >
+                      删除
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <div className="ticker-alias-empty">当前还没有维护别名。</div>
+              )}
+            </div>
+
+            <div className="ticker-keyword-section">
+              <div className="ticker-keyword-header">
+                <span className="ticker-keyword-title">Layer1 关键词预览</span>
+                <span className="ticker-keyword-count">{keywordSnapshot?.keywords.length ?? 0} 个</span>
+              </div>
+
+              <div className="ticker-keyword-subtitle">内置关键词</div>
+              {keywordSnapshot?.builtin_keywords?.length ? (
+                <div className="ticker-keyword-tags">
+                  {keywordSnapshot.builtin_keywords.map((keyword) => (
+                    <span key={`builtin-${keyword}`} className="ticker-keyword-tag builtin">{keyword}</span>
+                  ))}
+                </div>
+              ) : (
+                <div className="ticker-alias-empty ticker-keyword-empty">当前没有内置关键词。</div>
+              )}
+
+              <div className="ticker-keyword-subtitle">最终合并关键词</div>
+              {keywordSnapshot?.keywords?.length ? (
+                <div className="ticker-keyword-tags">
+                  {keywordSnapshot.keywords.map((keyword) => (
+                    <span key={`keyword-${keyword}`} className="ticker-keyword-tag">{keyword}</span>
+                  ))}
+                </div>
+              ) : (
+                <div className="ticker-alias-empty ticker-keyword-empty">当前没有可用关键词。</div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
       <div className="search-wrapper" ref={searchRef}>
         <input
           type="text"
@@ -144,7 +345,12 @@ export default function StockSelector({ activeTickers, selectedSymbol, onSelect,
           <ul className="search-dropdown">
             {results.map((t) => (
               <li key={t.symbol} onClick={() => handlePick(t)}>
-                <strong>{t.symbol}</strong> <span>{t.name}</span>
+                <div className="search-item-top">
+                  <strong>{t.symbol}</strong> <span>{t.name}</span>
+                </div>
+                {t.alias_hits && (
+                  <div className="search-item-alias">别名命中: {t.alias_hits}</div>
+                )}
               </li>
             ))}
           </ul>

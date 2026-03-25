@@ -14,10 +14,19 @@ def load_model_module():
     fake_features = types.SimpleNamespace(
         build_features=lambda *_: None,
         build_features_multi=lambda *_: None,
+        LEGACY_FEATURE_COLS=["legacy_a", "legacy_b"],
         FEATURE_COLS=["feature_a", "feature_b", "feature_c"],
     )
     fake_joblib = types.SimpleNamespace(dump=lambda *_, **__: None, load=lambda *_, **__: None)
     fake_xgboost = types.SimpleNamespace(XGBClassifier=object)
+    fake_numpy = types.SimpleNamespace(
+        inf=float("inf"),
+        nan=float("nan"),
+        float64=float,
+        bincount=lambda *args, **kwargs: [],
+        count_nonzero=lambda *args, **kwargs: 0,
+        nan_to_num=lambda value, **kwargs: value,
+    )
 
     sys.modules.pop("backend.ml.model", None)
     with mock.patch.dict(
@@ -26,9 +35,26 @@ def load_model_module():
             "backend.ml.features": fake_features,
             "joblib": fake_joblib,
             "xgboost": fake_xgboost,
+            "numpy": fake_numpy,
         },
     ):
         return importlib.import_module("backend.ml.model")
+
+
+class ModelFeatureColumnResolutionTests(unittest.TestCase):
+    def test_uses_meta_feature_columns_when_available(self):
+        model = load_model_module()
+
+        resolved = model._resolve_model_feature_cols({"feature_cols": ["x1", "x2"]})
+
+        self.assertEqual(resolved, ["x1", "x2"])
+
+    def test_falls_back_to_legacy_feature_columns_for_old_models(self):
+        model = load_model_module()
+
+        resolved = model._resolve_model_feature_cols({})
+
+        self.assertEqual(resolved, ["legacy_a", "legacy_b"])
 
 
 @unittest.skipIf(pd is None, "pandas-backed model tests require project dependencies")

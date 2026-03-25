@@ -8,10 +8,11 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from backend.config import settings
-from backend.database import get_conn
+from backend.database import ensure_ohlc_a_share_columns, get_conn
 from backend.tushare.client import fetch_ohlc, fetch_news, get_ticker_name
 from backend.pipeline.alignment import align_news_for_symbol
 from backend.pipeline.layer0 import run_layer0
+from backend.market_index import ensure_symbol_benchmark_history
 
 # 2 years of data
 TODAY = datetime.now(timezone.utc).date()
@@ -21,6 +22,8 @@ END = TODAY.isoformat()
 
 def fetch_and_store_ohlc(symbol: str) -> int:
     """Fetch OHLC data and store in database. Returns row count."""
+    ensure_ohlc_a_share_columns()
+    ensure_symbol_benchmark_history(symbol, START, END)
     try:
         rows = fetch_ohlc(symbol, START, END)
     except Exception as e:
@@ -35,11 +38,24 @@ def fetch_and_store_ohlc(symbol: str) -> int:
         with conn.cursor() as cur:
             for row in rows:
                 cur.execute(
-                    """INSERT IGNORE INTO ohlc
-                       (symbol, `date`, `open`, high, low, `close`, volume, vwap, transactions)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    """INSERT INTO ohlc
+                       (symbol, `date`, `open`, high, low, `close`, volume, vwap,
+                        turnover_rate, circ_mv, total_mv, transactions)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       ON DUPLICATE KEY UPDATE
+                         `open` = VALUES(`open`),
+                         high = VALUES(high),
+                         low = VALUES(low),
+                         `close` = VALUES(`close`),
+                         volume = VALUES(volume),
+                         vwap = VALUES(vwap),
+                         turnover_rate = COALESCE(VALUES(turnover_rate), turnover_rate),
+                         circ_mv = COALESCE(VALUES(circ_mv), circ_mv),
+                         total_mv = COALESCE(VALUES(total_mv), total_mv),
+                         transactions = VALUES(transactions)""",
                     (symbol, row["date"], row["open"], row["high"], row["low"],
-                     row["close"], row["volume"], row["vwap"], row["transactions"]),
+                     row["close"], row["volume"], row["vwap"], row.get("turnover_rate"),
+                     row.get("circ_mv"), row.get("total_mv"), row["transactions"]),
                 )
             cur.execute(
                 "UPDATE tickers SET last_ohlc_fetch = %s WHERE symbol = %s",

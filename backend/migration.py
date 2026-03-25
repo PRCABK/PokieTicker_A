@@ -5,8 +5,9 @@ import json
 import re
 from pathlib import Path
 
-from backend.database import get_conn, init_db
+from backend.database import ensure_layer1_event_columns, get_conn, init_db
 from backend.config import PROJECT_ROOT
+from backend.news_events import classify_event_types, event_types_to_json
 
 DATA_DIR = PROJECT_ROOT / "data"
 
@@ -166,6 +167,7 @@ def migrate_parsed_output(conn):
     if not OUTPUT_DIR.exists():
         print("  output/ directory not found, skipping")
         return
+    ensure_layer1_event_columns()
     count = 0
     with conn.cursor() as cur:
         for json_file in OUTPUT_DIR.glob("*.json"):
@@ -181,11 +183,18 @@ def migrate_parsed_output(conn):
             if not symbol:
                 print(f"  SKIP {json_file.name}: symbol not found")
                 continue
+            event_types = classify_event_types(
+                parsed.get("title", ""),
+                parsed.get("description", ""),
+                parsed.get("key_discussion", ""),
+                parsed.get("reason_growth", ""),
+                parsed.get("reason_decrease", ""),
+            )
             cur.execute(
                 """INSERT IGNORE INTO layer1_results
                    (news_id, symbol, relevance, key_discussion, chinese_summary,
-                    discussion, reason_growth, reason_decrease)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                    discussion, event_type, event_type_tags_json, reason_growth, reason_decrease)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (
                     news_id,
                     symbol,
@@ -193,6 +202,8 @@ def migrate_parsed_output(conn):
                     parsed.get("key_discussion", ""),
                     parsed.get("chinese_key_discussion", ""),
                     parsed.get("discussion", ""),
+                    event_types[0],
+                    event_types_to_json(event_types),
                     parsed.get("reason_growth", ""),
                     parsed.get("reason_decrease", ""),
                 ),

@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Query
 from typing import Optional
 
-from backend.database import get_conn
+from backend import database
+from backend.news_events import parse_event_types
 
 router = APIRouter()
 
@@ -20,7 +21,25 @@ def _normalize_return_fields(row: dict) -> dict:
     for field in RETURN_FIELDS:
         if field in normalized:
             normalized[field] = _percent_or_none(normalized[field])
+    normalized["event_types"] = parse_event_types(
+        normalized.get("event_type_tags_json"),
+        normalized.get("title"),
+        normalized.get("description"),
+        normalized.get("key_discussion"),
+        normalized.get("reason_growth"),
+        normalized.get("reason_decrease"),
+    )
+    normalized["event_type"] = normalized.get("event_type") or normalized["event_types"][0]
     return normalized
+
+
+def _ensure_news_schema_ready() -> None:
+    ensure = getattr(database, "ensure_news_aligned_attribution_columns", None)
+    if callable(ensure):
+        ensure()
+    ensure_layer1 = getattr(database, "ensure_layer1_event_columns", None)
+    if callable(ensure_layer1):
+        ensure_layer1()
 
 
 @router.get("/{symbol}")
@@ -29,7 +48,8 @@ def get_news_for_date(
     date: Optional[str] = None,
 ):
     """Get news for a symbol, optionally filtered to a specific trading day."""
-    conn = get_conn()
+    _ensure_news_schema_ready()
+    conn = database.get_conn()
     symbol = symbol.upper()
 
     try:
@@ -37,10 +57,12 @@ def get_news_for_date(
             if date:
                 cur.execute(
                     """SELECT na.news_id, na.trade_date, na.published_utc,
+                              na.session_bucket, na.label_anchor,
                               na.ret_t0, na.ret_t1, na.ret_t3, na.ret_t5, na.ret_t10,
                               nr.title, nr.description, nr.publisher, nr.article_url,
                               l1.relevance, l1.key_discussion, l1.chinese_summary,
-                              l1.sentiment, l1.reason_growth, l1.reason_decrease
+                              l1.sentiment, l1.event_type, l1.event_type_tags_json,
+                              l1.reason_growth, l1.reason_decrease
                        FROM news_aligned na
                        JOIN news_raw nr ON na.news_id = nr.id
                        LEFT JOIN layer1_results l1 ON na.news_id = l1.news_id AND l1.symbol = %s
@@ -51,10 +73,12 @@ def get_news_for_date(
             else:
                 cur.execute(
                     """SELECT na.news_id, na.trade_date, na.published_utc,
+                              na.session_bucket, na.label_anchor,
                               na.ret_t0, na.ret_t1, na.ret_t3, na.ret_t5, na.ret_t10,
                               nr.title, nr.description, nr.publisher, nr.article_url,
                               l1.relevance, l1.key_discussion, l1.chinese_summary,
-                              l1.sentiment, l1.reason_growth, l1.reason_decrease
+                              l1.sentiment, l1.event_type, l1.event_type_tags_json,
+                              l1.reason_growth, l1.reason_decrease
                        FROM news_aligned na
                        JOIN news_raw nr ON na.news_id = nr.id
                        LEFT JOIN layer1_results l1 ON na.news_id = l1.news_id AND l1.symbol = %s
@@ -76,17 +100,20 @@ def get_news_for_range(
     end: str = Query(..., description="End date YYYY-MM-DD"),
 ):
     """Get news within a date range, with top bullish/bearish articles."""
-    conn = get_conn()
+    _ensure_news_schema_ready()
+    conn = database.get_conn()
     symbol = symbol.upper()
 
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """SELECT na.news_id, na.trade_date, na.published_utc,
+                          na.session_bucket, na.label_anchor,
                           na.ret_t0, na.ret_t1, na.ret_t3, na.ret_t5, na.ret_t10,
                           nr.title, nr.description, nr.publisher, nr.article_url,
                           l1.relevance, l1.key_discussion, l1.chinese_summary,
-                          l1.sentiment, l1.reason_growth, l1.reason_decrease
+                          l1.sentiment, l1.event_type, l1.event_type_tags_json,
+                          l1.reason_growth, l1.reason_decrease
                    FROM news_aligned na
                    JOIN news_raw nr ON na.news_id = nr.id
                    LEFT JOIN layer1_results l1 ON na.news_id = l1.news_id AND l1.symbol = %s
@@ -123,14 +150,16 @@ def get_news_for_range(
 @router.get("/{symbol}/particles")
 def get_news_particles(symbol: str):
     """Return lightweight per-article data for chart particle visualization."""
-    conn = get_conn()
+    _ensure_news_schema_ready()
+    conn = database.get_conn()
     symbol = symbol.upper()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """SELECT na.news_id, na.trade_date, na.ret_t1,
+                          na.session_bucket, na.label_anchor,
                           nr.title,
-                          l1.sentiment, l1.relevance
+                          l1.sentiment, l1.relevance, l1.event_type, l1.event_type_tags_json
                    FROM news_aligned na
                    JOIN news_raw nr ON na.news_id = nr.id
                    LEFT JOIN layer1_results l1 ON na.news_id = l1.news_id AND l1.symbol = %s
@@ -149,6 +178,10 @@ def get_news_particles(symbol: str):
             "r": r["relevance"],
             "t": (r["title"] or "")[:80],
             "rt1": _percent_or_none(r["ret_t1"]),
+            "session_bucket": r.get("session_bucket"),
+            "label_anchor": r.get("label_anchor"),
+            "event_type": (r.get("event_type") or parse_event_types(r.get("event_type_tags_json"), r.get("title"))[0]),
+            "event_types": parse_event_types(r.get("event_type_tags_json"), r.get("title")),
         }
         for r in rows
     ]
@@ -157,7 +190,8 @@ def get_news_particles(symbol: str):
 @router.get("/{symbol}/categories")
 def get_news_categories(symbol: str):
     """Categorize ALL news for a symbol by topic using keyword matching."""
-    conn = get_conn()
+    _ensure_news_schema_ready()
+    conn = database.get_conn()
     symbol = symbol.upper()
 
     try:
@@ -165,10 +199,12 @@ def get_news_categories(symbol: str):
             cur.execute(
                 """SELECT na.news_id,
                           nr.title,
+                          nr.description,
                           l1.key_discussion,
                           l1.reason_growth,
                           l1.reason_decrease,
-                          l1.sentiment
+                          l1.sentiment,
+                          l1.event_type_tags_json
                    FROM news_aligned na
                    JOIN news_raw nr ON na.news_id = nr.id
                    LEFT JOIN layer1_results l1 ON na.news_id = l1.news_id AND l1.symbol = %s
@@ -180,34 +216,21 @@ def get_news_categories(symbol: str):
     finally:
         conn.close()
 
-    CATEGORY_KEYWORDS = {
-        "market": [
-            "大盘", "市场", "行情", "指数", "A股", "沪深", "上证", "深证",
-            "涨停", "跌停", "放量", "缩量", "牛市", "熊市", "震荡",
-        ],
-        "policy": [
-            "政策", "监管", "央行", "利率", "降准", "降息", "财政",
-            "国务院", "证监会", "银保监", "税收", "关税", "制裁",
-        ],
-        "earnings": [
-            "业绩", "营收", "利润", "财报", "年报", "季报", "中报",
-            "增长", "亏损", "预增", "预减", "快报", "分红",
-        ],
-        "product_tech": [
-            "产品", "技术", "芯片", "新能源", "人工智能", "AI",
-            "5G", "半导体", "创新", "研发", "专利", "自动驾驶",
-        ],
-        "competition": [
-            "竞争", "对手", "市场份额", "超越", "领先", "行业格局",
-        ],
-        "management": [
-            "董事长", "总经理", "高管", "辞职", "裁员", "重组",
-            "管理层", "人事变动", "任命", "董事会",
-        ],
+    EVENT_LABELS = {
+        "earnings": "earnings",
+        "policy": "policy",
+        "order_contract": "order_contract",
+        "product_tech": "product_tech",
+        "buyback_increase": "buyback_increase",
+        "reduction_unlock": "reduction_unlock",
+        "mna_restructuring": "mna_restructuring",
+        "litigation_penalty": "litigation_penalty",
+        "management": "management",
+        "other": "other",
     }
 
     categories = {}
-    for cat, keywords in CATEGORY_KEYWORDS.items():
+    for cat in EVENT_LABELS.values():
         categories[cat] = {
             "label": cat,
             "count": 0,
@@ -219,23 +242,33 @@ def get_news_categories(symbol: str):
 
     total = len(rows)
     for r in rows:
-        text = " ".join([
-            (r["title"] or ""),
-            (r["key_discussion"] or ""),
-            (r["reason_growth"] or ""),
-            (r["reason_decrease"] or ""),
-        ]).lower()
+        event_types = parse_event_types(
+            r.get("event_type_tags_json"),
+            r.get("title"),
+            r.get("description"),
+            r.get("key_discussion"),
+            r.get("reason_growth"),
+            r.get("reason_decrease"),
+        )
         sentiment = r["sentiment"]
-        for cat, keywords in CATEGORY_KEYWORDS.items():
-            if any(kw in text for kw in keywords):
-                categories[cat]["count"] += 1
-                categories[cat]["article_ids"].append(r["news_id"])
-                if sentiment == "positive":
-                    categories[cat]["positive_ids"].append(r["news_id"])
-                elif sentiment == "negative":
-                    categories[cat]["negative_ids"].append(r["news_id"])
-                else:
-                    categories[cat]["neutral_ids"].append(r["news_id"])
+        for cat in event_types:
+            if cat not in categories:
+                categories[cat] = {
+                    "label": cat,
+                    "count": 0,
+                    "article_ids": [],
+                    "positive_ids": [],
+                    "negative_ids": [],
+                    "neutral_ids": [],
+                }
+            categories[cat]["count"] += 1
+            categories[cat]["article_ids"].append(r["news_id"])
+            if sentiment == "positive":
+                categories[cat]["positive_ids"].append(r["news_id"])
+            elif sentiment == "negative":
+                categories[cat]["negative_ids"].append(r["news_id"])
+            else:
+                categories[cat]["neutral_ids"].append(r["news_id"])
 
     return {"categories": categories, "total": total}
 
@@ -243,7 +276,8 @@ def get_news_categories(symbol: str):
 @router.get("/{symbol}/timeline")
 def get_news_timeline(symbol: str):
     """Get dates that have news for a symbol (used for chart markers)."""
-    conn = get_conn()
+    _ensure_news_schema_ready()
+    conn = database.get_conn()
     symbol = symbol.upper()
 
     try:

@@ -15,15 +15,23 @@ import numpy as np
 import pandas as pd
 import joblib
 
-from backend.database import get_conn
-from backend.ml.features import build_features, FEATURE_COLS
+from backend import database
+from backend.ml.features import build_features, FEATURE_COLS, LEGACY_FEATURE_COLS
+from backend.ml.stratification import derive_row_stratification
+from backend.news_events import parse_event_types
 
 MODELS_DIR = Path(__file__).parent / "models"
 
 
 def _load_recent_news(symbol: str, window_days: int, ref_date: str | None = None) -> list[dict]:
     """Load recent news articles within the window."""
-    conn = get_conn()
+    ensure = getattr(database, "ensure_news_aligned_attribution_columns", None)
+    if callable(ensure):
+        ensure()
+    ensure_layer1 = getattr(database, "ensure_layer1_event_columns", None)
+    if callable(ensure_layer1):
+        ensure_layer1()
+    conn = database.get_conn()
     try:
         with conn.cursor() as cur:
             if ref_date is None:
@@ -39,8 +47,11 @@ def _load_recent_news(symbol: str, window_days: int, ref_date: str | None = None
             cutoff = (ref_dt - timedelta(days=window_days)).strftime("%Y-%m-%d")
             cur.execute(
                 """SELECT na.news_id, na.trade_date, nr.title,
+                          na.session_bucket, na.label_anchor,
+                          nr.description,
                           l1.sentiment, l1.chinese_summary,
                           l1.relevance, l1.key_discussion,
+                          l1.event_type, l1.event_type_tags_json,
                           na.ret_t0, na.ret_t1
                    FROM news_aligned na
                    JOIN news_raw nr ON na.news_id = nr.id
@@ -53,16 +64,33 @@ def _load_recent_news(symbol: str, window_days: int, ref_date: str | None = None
             rows = cur.fetchall()
     finally:
         conn.close()
-    return list(rows)
+    normalized_rows = []
+    for row in rows:
+        event_types = parse_event_types(
+            row.get("event_type_tags_json"),
+            row.get("title"),
+            row.get("description"),
+            row.get("key_discussion"),
+        )
+        normalized = dict(row)
+        normalized["event_types"] = event_types
+        normalized["event_type"] = row.get("event_type") or event_types[0]
+        normalized_rows.append(normalized)
+    return normalized_rows
 
 
-def _compute_window_features(df: pd.DataFrame, window_days: int) -> np.ndarray | None:
+def _compute_window_features(
+    df: pd.DataFrame,
+    window_days: int,
+    feature_cols: list[str] | None = None,
+) -> np.ndarray | None:
     """Average the feature vectors over the last `window_days` trading days."""
+    feature_cols = FEATURE_COLS if feature_cols is None else feature_cols
     if df.empty:
         return None
     n_rows = min(window_days, len(df))
     window_df = df.iloc[-n_rows:]
-    vec = window_df[FEATURE_COLS].mean().values.astype(np.float64)
+    vec = window_df.reindex(columns=feature_cols).mean().values.astype(np.float64)
     np.nan_to_num(vec, copy=False)
     return vec
 
@@ -152,6 +180,7 @@ def generate_forecast(symbol: str, window_days: int = 7) -> dict:
         return {"error": f"No feature data for {symbol}"}
 
     last_date = df.iloc[-1]["trade_date"].strftime("%Y-%m-%d")
+    current_stratification = derive_row_stratification(df.iloc[-1])
 
     # 1. Recent news
     recent_news = _load_recent_news(symbol, window_days, ref_date=last_date)
@@ -209,6 +238,10 @@ def generate_forecast(symbol: str, window_days: int = 7) -> dict:
                 "title": (n["title"] or "")[:100],
                 "sentiment": n.get("sentiment", "unknown"),
                 "summary": (n.get("chinese_summary") or "")[:120],
+                "session_bucket": n.get("session_bucket"),
+                "label_anchor": n.get("label_anchor"),
+                "event_type": n.get("event_type"),
+                "event_types": n.get("event_types", []),
             }
             for n in recent_news[:10]
         ],
@@ -219,6 +252,10 @@ def generate_forecast(symbol: str, window_days: int = 7) -> dict:
                 "title": (n["title"] or "")[:120],
                 "sentiment": n.get("sentiment", "unknown"),
                 "relevance": n.get("relevance"),
+                "session_bucket": n.get("session_bucket"),
+                "label_anchor": n.get("label_anchor"),
+                "event_type": n.get("event_type"),
+                "event_types": n.get("event_types", []),
                 "key_discussion": (n.get("key_discussion") or "")[:150],
                 "ret_t0": round(n["ret_t0"] * 100, 2) if n.get("ret_t0") is not None else None,
                 "ret_t1": round(n["ret_t1"] * 100, 2) if n.get("ret_t1") is not None else None,
@@ -228,8 +265,8 @@ def generate_forecast(symbol: str, window_days: int = 7) -> dict:
     }
 
     # 2. Window feature vector
-    window_vec = _compute_window_features(df, window_days)
-    if window_vec is None:
+    similarity_window_vec = _compute_window_features(df, window_days)
+    if similarity_window_vec is None:
         return {"error": "Cannot compute features"}
 
     # 3. Model predictions
@@ -264,24 +301,29 @@ def generate_forecast(symbol: str, window_days: int = 7) -> dict:
 
         model = joblib.load(model_path)
         meta = json.loads(meta_path.read_text())
+        model_feature_cols = meta.get("feature_cols") or LEGACY_FEATURE_COLS
 
         # Use window-level averaged features for forecast prediction so different
         # windows (e.g. 7d vs 30d) map to different model inputs.
-        X = window_vec.reshape(1, -1).astype(np.float64)
+        model_window_vec = _compute_window_features(df, window_days, feature_cols=model_feature_cols)
+        if model_window_vec is None:
+            continue
+        X = model_window_vec.reshape(1, -1).astype(np.float64)
         np.nan_to_num(X, copy=False)
 
         proba = model.predict_proba(X)[0]
         pred_class = int(np.argmax(proba))
         confidence = float(proba[pred_class])
 
-        feature_means = df[FEATURE_COLS].mean().values.astype(np.float64)
-        feature_stds = df[FEATURE_COLS].std().values.astype(np.float64)
+        feature_frame = df.reindex(columns=model_feature_cols)
+        feature_means = feature_frame.mean().values.astype(np.float64)
+        feature_stds = feature_frame.std().values.astype(np.float64)
         feature_stds[feature_stds < 1e-10] = 1.0
         importances = model.feature_importances_
         vec = X[0]
 
         contributions = []
-        for i, col in enumerate(FEATURE_COLS):
+        for i, col in enumerate(model_feature_cols):
             val = float(vec[i])
             z = (val - feature_means[i]) / feature_stds[i]
             contrib = abs(z) * importances[i]
@@ -300,6 +342,11 @@ def generate_forecast(symbol: str, window_days: int = 7) -> dict:
             "direction": "up" if pred_class == 1 else "down",
             "confidence": round(confidence, 4),
             "model_type": "XGBoost",
+            "target_definition": meta.get("target_definition", "absolute_direction"),
+            "benchmark_symbol": meta.get("benchmark_symbol"),
+            "train_stratification": meta.get("train_stratification"),
+            "test_stratification": meta.get("test_stratification"),
+            "test_stratified_metrics": meta.get("test_stratified_metrics"),
             "top_drivers": contributions[:6],
             "model_accuracy": meta.get("accuracy", 0),
             "baseline_accuracy": meta.get("baseline", 0),
@@ -314,6 +361,7 @@ def generate_forecast(symbol: str, window_days: int = 7) -> dict:
             "forecast_date": last_date,
             "news_summary": news_summary,
             "prediction": {},
+            "current_stratification": current_stratification,
             "similar_periods": [],
             "similar_stats": {"count": 0, "up_ratio_5d": 0, "up_ratio_10d": 0, "avg_ret_5d": None, "avg_ret_10d": None},
             "conclusion": (
@@ -326,7 +374,7 @@ def generate_forecast(symbol: str, window_days: int = 7) -> dict:
         }
 
     # 4. Similar historical periods
-    similar_periods = _find_similar_periods(df, window_vec, window_days, top_k=10)
+    similar_periods = _find_similar_periods(df, similarity_window_vec, window_days, top_k=10)
 
     rets_5 = [p["ret_after_5d"] for p in similar_periods if p["ret_after_5d"] is not None]
     rets_10 = [p["ret_after_10d"] for p in similar_periods if p["ret_after_10d"] is not None]
@@ -352,6 +400,7 @@ def generate_forecast(symbol: str, window_days: int = 7) -> dict:
         "forecast_date": last_date,
         "news_summary": news_summary,
         "prediction": prediction,
+        "current_stratification": current_stratification,
         "similar_periods": similar_periods,
         "similar_stats": similar_stats,
         "conclusion": conclusion,
@@ -397,10 +446,17 @@ def _build_conclusion(
         p = prediction.get(h_key)
         if not p:
             continue
-        direction = "看多" if p["direction"] == "up" else "看空"
+        target_definition = p.get("target_definition", "absolute_direction")
+        benchmark_symbol = p.get("benchmark_symbol")
+        if target_definition == "excess_return_vs_benchmark" and benchmark_symbol:
+            direction = "相对基准偏强" if p["direction"] == "up" else "相对基准偏弱"
+            benchmark_text = f"（相对基准 {benchmark_symbol}）"
+        else:
+            direction = "看多" if p["direction"] == "up" else "看空"
+            benchmark_text = ""
         confidence = p["confidence"] * 100
         model_tag = f"[{p.get('model_type', 'XGBoost')}]" if p.get("model_type") else ""
-        parts.append(f"{model_tag} 模型{h_label}预测: {direction}，置信度 {confidence:.0f}%。")
+        parts.append(f"{model_tag} 模型{h_label}预测: {direction}{benchmark_text}，置信度 {confidence:.0f}%。")
 
     if similar_stats["count"] > 0:
         up_ratio_5d = similar_stats.get("up_ratio_5d")

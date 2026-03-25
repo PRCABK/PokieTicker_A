@@ -16,6 +16,13 @@ CREATE TABLE IF NOT EXISTS tickers (
     last_news_fetch   VARCHAR(20) COMMENT '最近新闻抓取日期'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS ticker_aliases (
+    symbol        VARCHAR(20) NOT NULL COMMENT '股票代码',
+    alias         VARCHAR(100) NOT NULL COMMENT '别名/简称/产品名',
+    alias_type    VARCHAR(30) COMMENT '别名类型',
+    PRIMARY KEY (symbol, alias)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- 日线行情表
 CREATE TABLE IF NOT EXISTS ohlc (
     symbol        VARCHAR(20) NOT NULL COMMENT '股票代码',
@@ -26,7 +33,22 @@ CREATE TABLE IF NOT EXISTS ohlc (
     `close`       DOUBLE COMMENT '收盘价',
     volume        DOUBLE COMMENT '成交量(手)',
     vwap          DOUBLE COMMENT '成交额(千元)',
+    turnover_rate DOUBLE COMMENT '换手率(%)',
+    circ_mv       DOUBLE COMMENT '流通市值(万元)',
+    total_mv      DOUBLE COMMENT '总市值(万元)',
     transactions  INT COMMENT '预留字段',
+    PRIMARY KEY (symbol, `date`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS market_index_daily (
+    symbol        VARCHAR(20) NOT NULL COMMENT '指数代码',
+    `date`        VARCHAR(20) NOT NULL COMMENT '交易日期',
+    `open`        DOUBLE COMMENT '开盘价',
+    high          DOUBLE COMMENT '最高价',
+    low           DOUBLE COMMENT '最低价',
+    `close`       DOUBLE COMMENT '收盘价',
+    volume        DOUBLE COMMENT '成交量',
+    amount        DOUBLE COMMENT '成交额(千元)',
     PRIMARY KEY (symbol, `date`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -69,6 +91,8 @@ CREATE TABLE IF NOT EXISTS layer1_results (
     key_discussion      TEXT COMMENT '关键讨论',
     chinese_summary     TEXT COMMENT '中文摘要',
     sentiment           VARCHAR(20) COMMENT '情感倾向',
+    event_type          VARCHAR(50) COMMENT '主事件类型',
+    event_type_tags_json TEXT COMMENT '事件类型标签JSON',
     discussion          TEXT COMMENT '讨论内容',
     reason_growth       TEXT COMMENT '上涨原因',
     reason_decrease     TEXT COMMENT '下跌原因',
@@ -92,6 +116,8 @@ CREATE TABLE IF NOT EXISTS news_aligned (
     symbol        VARCHAR(20) NOT NULL,
     trade_date    VARCHAR(20) NOT NULL COMMENT '对齐的交易日',
     published_utc VARCHAR(40) COMMENT '发布时间',
+    session_bucket VARCHAR(30) COMMENT 'A股发布时间归因桶: pre_market/intraday_morning/midday_break/intraday_afternoon/post_market/non_trading',
+    label_anchor  VARCHAR(30) COMMENT '收益标签锚点: same_day_open/same_day_close/afternoon_open/next_open',
     ret_t0        DOUBLE COMMENT '当日收益率',
     ret_t1        DOUBLE COMMENT 'T+1收益率',
     ret_t3        DOUBLE COMMENT 'T+3收益率',

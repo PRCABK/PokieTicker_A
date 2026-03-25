@@ -23,12 +23,16 @@ interface Props {
 }
 
 const CATEGORY_META: Record<string, { icon: string; zh: string; color: string }> = {
-  market:       { icon: '📈', zh: '市场影响',       color: '#667eea' },
   policy:       { icon: '🏛️', zh: '政策影响',       color: '#f59e0b' },
   earnings:     { icon: '💰', zh: '财报业绩',            color: '#10b981' },
+  order_contract: { icon: '📦', zh: '订单合同', color: '#2563eb' },
   product_tech: { icon: '🚀', zh: '产品技术',      color: '#8b5cf6' },
-  competition:  { icon: '⚔️',  zh: '市场竞争',         color: '#ef4444' },
+  buyback_increase: { icon: '🛡️', zh: '回购增持', color: '#14b8a6' },
+  reduction_unlock: { icon: '📤', zh: '减持解禁', color: '#ef4444' },
+  mna_restructuring: { icon: '🔀', zh: '并购重组', color: '#7c3aed' },
+  litigation_penalty: { icon: '⚖️', zh: '诉讼处罚', color: '#dc2626' },
   management:   { icon: '👤', zh: '管理层变动',   color: '#06b6d4' },
+  other:        { icon: '📌', zh: '其他事件', color: '#64748b' },
 };
 
 type SentimentFilter = 'all' | 'positive' | 'negative';

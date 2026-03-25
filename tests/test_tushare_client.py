@@ -107,6 +107,73 @@ class TushareClientCacheTests(unittest.TestCase):
         self.assertEqual(matches, [{"symbol": "688981.SH", "name": "SMIC", "sector": "Semiconductor"}])
         self.assertEqual(pro.stock_basic.call_count, 2)
 
+    def test_fetch_ohlc_merges_daily_basic_fields_by_trade_date(self):
+        pro = mock.Mock()
+        pro.daily.return_value = FakeFrame(
+            [
+                {
+                    "trade_date": "20240103",
+                    "open": 10.0,
+                    "high": 10.8,
+                    "low": 9.9,
+                    "close": 10.5,
+                    "vol": 123456,
+                    "amount": 789012,
+                },
+                {
+                    "trade_date": "20240102",
+                    "open": 9.8,
+                    "high": 10.2,
+                    "low": 9.6,
+                    "close": 10.0,
+                    "vol": 100000,
+                    "amount": 650000,
+                },
+            ]
+        )
+        pro.daily_basic.return_value = FakeFrame(
+            [
+                {"trade_date": "20240102", "turnover_rate": 3.2, "circ_mv": 550000, "total_mv": 780000},
+                {"trade_date": "20240103", "turnover_rate": 4.5, "circ_mv": 560000, "total_mv": 790000},
+            ]
+        )
+        client = load_tushare_client_module(pro)
+
+        rows = client.fetch_ohlc("000001.SZ", "2024-01-01", "2024-01-05")
+
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "date": "2024-01-02",
+                    "open": 9.8,
+                    "high": 10.2,
+                    "low": 9.6,
+                    "close": 10.0,
+                    "volume": 100000.0,
+                    "vwap": 650000.0,
+                    "turnover_rate": 3.2,
+                    "circ_mv": 550000.0,
+                    "total_mv": 780000.0,
+                    "transactions": None,
+                },
+                {
+                    "date": "2024-01-03",
+                    "open": 10.0,
+                    "high": 10.8,
+                    "low": 9.9,
+                    "close": 10.5,
+                    "volume": 123456.0,
+                    "vwap": 789012.0,
+                    "turnover_rate": 4.5,
+                    "circ_mv": 560000.0,
+                    "total_mv": 790000.0,
+                    "transactions": None,
+                },
+            ],
+        )
+        pro.daily_basic.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

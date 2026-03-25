@@ -9,11 +9,12 @@ from datetime import datetime, timedelta, timezone
 logger = logging.getLogger(__name__)
 
 from backend.config import settings
-from backend.database import get_conn
+from backend.database import ensure_ohlc_a_share_columns, get_conn
 from backend.tushare.client import fetch_ohlc, fetch_news  # noqa: F401
 from backend.pipeline.layer0 import run_layer0
 from backend.pipeline.layer1 import run_layer1
 from backend.pipeline.alignment import align_news_for_symbol
+from backend.market_index import ensure_symbol_benchmark_history
 
 import json
 
@@ -148,6 +149,19 @@ def _do_train(symbol: str, task_id: Optional[str] = None):
     from backend.ml.features import build_features
 
     _update_pipeline_task(task_id, status="running", message="Training models", mark_started=True)
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT MIN(`date`) AS min_date, MAX(`date`) AS max_date FROM ohlc WHERE symbol = %s",
+                (symbol,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if row and row["min_date"] and row["max_date"]:
+        ensure_symbol_benchmark_history(symbol, row["min_date"], row["max_date"])
 
     # Check if we have enough data
     df = build_features(symbol)
@@ -434,6 +448,8 @@ def _do_fetch(symbol: str, start: str, end: str, auto_train: bool = True, task_i
     """Background fetch of OHLC + news data."""
     _update_pipeline_task(task_id, status="running", message="Fetching OHLC and news", mark_started=True)
     try:
+        ensure_ohlc_a_share_columns()
+
         # Ensure ticker exists in DB first
         conn = get_conn()
         try:
@@ -450,6 +466,8 @@ def _do_fetch(symbol: str, start: str, end: str, auto_train: bool = True, task_i
         logger.info("Fetching OHLC for %s (%s ~ %s)...", symbol, start, end)
         ohlc_rows = fetch_ohlc(symbol, start, end)
         logger.info("Fetched %d OHLC rows for %s", len(ohlc_rows), symbol)
+        benchmark_symbol, benchmark_rows = ensure_symbol_benchmark_history(symbol, start, end)
+        logger.info("Ensured benchmark %s rows=%d for %s", benchmark_symbol, benchmark_rows, symbol)
 
         conn = get_conn()
         news_error: Optional[str] = None
@@ -457,11 +475,24 @@ def _do_fetch(symbol: str, start: str, end: str, auto_train: bool = True, task_i
             with conn.cursor() as cur:
                 for row in ohlc_rows:
                     cur.execute(
-                        """INSERT IGNORE INTO ohlc
-                           (symbol, `date`, `open`, high, low, `close`, volume, vwap, transactions)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        """INSERT INTO ohlc
+                           (symbol, `date`, `open`, high, low, `close`, volume, vwap,
+                            turnover_rate, circ_mv, total_mv, transactions)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                           ON DUPLICATE KEY UPDATE
+                             `open` = VALUES(`open`),
+                             high = VALUES(high),
+                             low = VALUES(low),
+                             `close` = VALUES(`close`),
+                             volume = VALUES(volume),
+                             vwap = VALUES(vwap),
+                             turnover_rate = COALESCE(VALUES(turnover_rate), turnover_rate),
+                             circ_mv = COALESCE(VALUES(circ_mv), circ_mv),
+                             total_mv = COALESCE(VALUES(total_mv), total_mv),
+                             transactions = VALUES(transactions)""",
                         (symbol, row["date"], row["open"], row["high"], row["low"],
-                         row["close"], row["volume"], row["vwap"], row["transactions"]),
+                         row["close"], row["volume"], row["vwap"], row.get("turnover_rate"),
+                         row.get("circ_mv"), row.get("total_mv"), row["transactions"]),
                     )
                 cur.execute(
                     "UPDATE tickers SET last_ohlc_fetch = %s WHERE symbol = %s",

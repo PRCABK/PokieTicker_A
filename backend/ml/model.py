@@ -7,7 +7,12 @@ from datetime import datetime
 import numpy as np
 import joblib
 
-from backend.ml.features import build_features, build_features_multi, FEATURE_COLS
+from backend.ml.features import build_features, build_features_multi, FEATURE_COLS, LEGACY_FEATURE_COLS
+from backend.ml.stratification import (
+    derive_row_stratification,
+    summarize_prediction_stratification,
+    summarize_sample_stratification,
+)
 
 MODELS_DIR = Path(__file__).parent / "models"
 MODELS_DIR.mkdir(exist_ok=True)
@@ -23,8 +28,11 @@ def _prepare_training_dataset(
     target_col: str,
     min_rows: int,
     sort_cols: list[str],
+    feature_cols: list[str] | None = None,
 ) -> tuple[dict | None, str | None]:
     """Validate training inputs before fitting a model."""
+    feature_cols = FEATURE_COLS if feature_cols is None else feature_cols
+
     if df.empty:
         return None, "No feature data available"
 
@@ -32,14 +40,14 @@ def _prepare_training_dataset(
     if len(working) < min_rows:
         return None, f"Not enough data ({len(working)} rows)"
 
-    feature_frame = working[FEATURE_COLS].replace([np.inf, -np.inf], np.nan)
-    empty_feature_cols = [col for col in FEATURE_COLS if feature_frame[col].notna().sum() == 0]
+    feature_frame = working.reindex(columns=feature_cols).replace([np.inf, -np.inf], np.nan)
+    empty_feature_cols = [col for col in feature_cols if feature_frame[col].notna().sum() == 0]
     if empty_feature_cols:
         cols = ", ".join(empty_feature_cols[:3])
         return None, f"Invalid features: no usable values for {cols}"
 
     informative_feature_count = sum(
-        1 for col in FEATURE_COLS if feature_frame[col].nunique(dropna=True) > 1
+        1 for col in feature_cols if feature_frame[col].nunique(dropna=True) > 1
     )
     if informative_feature_count == 0:
         return None, "Invalid features: all feature columns are constant or empty"
@@ -79,7 +87,14 @@ def _prepare_training_dataset(
         "dates": working["trade_date"].dt.strftime("%Y-%m-%d").tolist(),
         "symbols": working["symbol"].tolist() if "symbol" in working.columns else None,
         "split_idx": split_idx,
+        "feature_cols": feature_cols,
     }, None
+
+
+def _resolve_model_feature_cols(meta: dict | None) -> list[str]:
+    if meta and isinstance(meta.get("feature_cols"), list) and meta["feature_cols"]:
+        return [str(col) for col in meta["feature_cols"]]
+    return list(LEGACY_FEATURE_COLS)
 
 
 def train(symbol: str, horizon: str = "t1") -> dict:
@@ -103,6 +118,15 @@ def train(symbol: str, horizon: str = "t1") -> dict:
     y = prepared["y"]
     dates = prepared["dates"]
     split_idx = prepared["split_idx"]
+    feature_cols = prepared["feature_cols"]
+    benchmark_symbol = None
+    target_definition = "absolute_direction_fallback"
+    if "benchmark_symbol" in prepared["df"].columns:
+        benchmark_values = prepared["df"]["benchmark_symbol"].dropna().astype(str)
+        if not benchmark_values.empty:
+            benchmark_symbol = benchmark_values.mode().iloc[0]
+    if "benchmark_available" in prepared["df"].columns and float(prepared["df"]["benchmark_available"].sum()) > 0:
+        target_definition = "excess_return_vs_benchmark"
     X_train, X_test = X[:split_idx], X[split_idx:]
     y_train, y_test = y[:split_idx], y[split_idx:]
 
@@ -127,7 +151,7 @@ def train(symbol: str, horizon: str = "t1") -> dict:
     # Feature importance
     importances = model.feature_importances_
     top_features = sorted(
-        zip(FEATURE_COLS, importances.tolist()),
+        zip(feature_cols, importances.tolist()),
         key=lambda x: x[1],
         reverse=True,
     )[:10]
@@ -146,6 +170,17 @@ def train(symbol: str, horizon: str = "t1") -> dict:
         "train_end": dates[split_idx - 1],
         "test_start": dates[split_idx],
         "test_end": dates[-1],
+        "train_stratification": summarize_sample_stratification(prepared["df"], range(0, split_idx)),
+        "test_stratification": summarize_sample_stratification(prepared["df"], range(split_idx, len(prepared["df"]))),
+        "test_stratified_metrics": summarize_prediction_stratification(
+            prepared["df"],
+            range(split_idx, len(prepared["df"])),
+            y_test,
+            y_pred,
+        ),
+        "feature_cols": feature_cols,
+        "target_definition": target_definition,
+        "benchmark_symbol": benchmark_symbol,
         "top_features": [{"name": n, "importance": round(v, 4)} for n, v in top_features],
         "trained_at": datetime.now().isoformat(),
     }
@@ -179,6 +214,13 @@ def train_unified(horizon: str = "t1", symbols: list[str] | None = None) -> dict
     y = prepared["y"]
     dates = prepared["dates"]
     syms = prepared["symbols"] or []
+    feature_cols = prepared["feature_cols"]
+    benchmark_symbols = []
+    target_definition = "absolute_direction_fallback"
+    if "benchmark_symbol" in prepared["df"].columns:
+        benchmark_symbols = sorted(set(prepared["df"]["benchmark_symbol"].dropna().astype(str)))
+    if "benchmark_available" in prepared["df"].columns and float(prepared["df"]["benchmark_available"].sum()) > 0:
+        target_definition = "excess_return_vs_benchmark"
 
     # Time-series split on globally sorted chronological rows.
     split_idx = prepared["split_idx"]
@@ -204,7 +246,7 @@ def train_unified(horizon: str = "t1", symbols: list[str] | None = None) -> dict
 
     importances = model.feature_importances_
     top_features = sorted(
-        zip(FEATURE_COLS, importances.tolist()),
+        zip(feature_cols, importances.tolist()),
         key=lambda x: x[1],
         reverse=True,
     )[:10]
@@ -223,7 +265,18 @@ def train_unified(horizon: str = "t1", symbols: list[str] | None = None) -> dict
         "train_end": dates[split_idx - 1],
         "test_start": dates[split_idx],
         "test_end": dates[-1],
+        "train_stratification": summarize_sample_stratification(prepared["df"], range(0, split_idx)),
+        "test_stratification": summarize_sample_stratification(prepared["df"], range(split_idx, len(prepared["df"]))),
+        "test_stratified_metrics": summarize_prediction_stratification(
+            prepared["df"],
+            range(split_idx, len(prepared["df"])),
+            y_test,
+            y_pred,
+        ),
         "tickers": sorted(set(syms)),
+        "feature_cols": feature_cols,
+        "target_definition": target_definition,
+        "benchmark_symbols": benchmark_symbols,
         "top_features": [{"name": n, "importance": round(v, 4)} for n, v in top_features],
         "trained_at": datetime.now().isoformat(),
     }
@@ -250,6 +303,7 @@ def predict(symbol: str, horizon: str = "t1") -> dict:
 
     model = joblib.load(model_path)
     meta = json.loads(meta_path.read_text())
+    feature_cols = _resolve_model_feature_cols(meta)
 
     df = build_features(symbol)
     if df.empty:
@@ -257,7 +311,9 @@ def predict(symbol: str, horizon: str = "t1") -> dict:
 
     # Use the last row (most recent trading day with complete features)
     last_row = df.iloc[-1]
-    X = last_row[FEATURE_COLS].values.reshape(1, -1).astype(np.float64)
+    feature_frame = df.tail(1).reindex(columns=feature_cols)
+    X = feature_frame.to_numpy(dtype=np.float64)
+    np.nan_to_num(X, copy=False)
 
     proba = model.predict_proba(X)[0]
     pred_class = int(np.argmax(proba))
@@ -265,9 +321,12 @@ def predict(symbol: str, horizon: str = "t1") -> dict:
 
     # Top feature contributions for this prediction
     importances = model.feature_importances_
-    feature_values = {col: float(last_row[col]) for col in FEATURE_COLS}
+    feature_values = {
+        col: round(float(np.nan_to_num(feature_frame.iloc[0][col], nan=0.0)), 4)
+        for col in feature_cols
+    }
     top = sorted(
-        zip(FEATURE_COLS, importances.tolist()),
+        zip(feature_cols, importances.tolist()),
         key=lambda x: x[1],
         reverse=True,
     )[:5]
@@ -278,6 +337,9 @@ def predict(symbol: str, horizon: str = "t1") -> dict:
         "direction": "up" if pred_class == 1 else "down",
         "confidence": round(confidence, 4),
         "date": str(last_row["trade_date"].date()),
+        "stratification": derive_row_stratification(last_row),
+        "target_definition": meta.get("target_definition", "absolute_direction"),
+        "benchmark_symbol": meta.get("benchmark_symbol"),
         "top_features": [
             {"name": n, "value": round(feature_values[n], 4), "importance": round(imp, 4)}
             for n, imp in top

@@ -15,7 +15,8 @@ from typing import List, Dict, Any
 from openai import OpenAI
 
 from backend.config import settings
-from backend.database import get_conn
+from backend.database import ensure_layer1_event_columns, ensure_ticker_alias_table, get_conn
+from backend.news_events import classify_event_types, event_types_to_json
 
 logger = logging.getLogger(__name__)
 
@@ -39,18 +40,66 @@ TICKER_KEYWORDS: Dict[str, List[str]] = {
     "600900.SH": ["长江电力", "长电", "600900"],
 }
 
+_ticker_keyword_cache: Dict[str, List[str]] = {}
+
 # Minimum description length to trigger extraction (shorter ones sent in full)
 EXTRACT_THRESHOLD = 500
 
 
 def _get_keywords(symbol: str) -> List[str]:
     """Get all keywords for a ticker. Falls back to just the symbol."""
+    symbol = symbol.upper()
+    if symbol in _ticker_keyword_cache:
+        return list(_ticker_keyword_cache[symbol])
+
     kws = [symbol.lower()]
     # 也添加纯数字代码
     code = symbol.split(".")[0] if "." in symbol else symbol
     kws.append(code)
     kws.extend(TICKER_KEYWORDS.get(symbol, []))
-    return kws
+
+    ensure_ticker_alias_table()
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT name FROM tickers WHERE symbol = %s", (symbol,))
+            ticker_row = cur.fetchone()
+            if ticker_row and ticker_row.get("name"):
+                kws.append(str(ticker_row["name"]))
+
+            cur.execute("SELECT alias FROM ticker_aliases WHERE symbol = %s", (symbol,))
+            alias_rows = cur.fetchall()
+            kws.extend(str(row["alias"]) for row in alias_rows if row.get("alias"))
+    finally:
+        conn.close()
+
+    deduped: list[str] = []
+    seen = set()
+    for kw in kws:
+        normalized = str(kw).strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+
+    _ticker_keyword_cache[symbol] = deduped
+    return list(deduped)
+
+
+def get_keywords(symbol: str) -> List[str]:
+    """Public wrapper used by API/debug tooling."""
+    return _get_keywords(symbol)
+
+
+def invalidate_keyword_cache(symbol: str | None = None) -> None:
+    """Invalidate cached keyword expansions when ticker metadata changes."""
+    global _ticker_keyword_cache
+
+    if symbol is None:
+        _ticker_keyword_cache.clear()
+        return
+
+    _ticker_keyword_cache.pop(symbol.upper(), None)
 
 
 def _extract_relevant_text(description: str, symbol: str) -> str:
@@ -135,6 +184,7 @@ def process_batch_group(
         timeout=90.0,
     )
     conn = get_conn()
+    ensure_layer1_event_columns()
 
     stats = {"processed": 0, "relevant": 0, "irrelevant": 0, "errors": 0}
 
@@ -182,15 +232,24 @@ def process_batch_group(
                 relevance = "relevant" if is_relevant else "irrelevant"
                 raw_s = item.get("s", "0")
                 sentiment = {"+": "positive", "-": "negative"}.get(raw_s, "neutral")
+                event_types = classify_event_types(
+                    art.get("title"),
+                    art.get("description"),
+                    item.get("e", ""),
+                    item.get("u", ""),
+                    item.get("d", ""),
+                )
 
                 cur.execute(
                     """INSERT INTO layer1_results
                        (news_id, symbol, relevance, key_discussion, sentiment,
-                        reason_growth, reason_decrease)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        event_type, event_type_tags_json, reason_growth, reason_decrease)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                        ON DUPLICATE KEY UPDATE
                         relevance=VALUES(relevance), key_discussion=VALUES(key_discussion),
-                        sentiment=VALUES(sentiment), reason_growth=VALUES(reason_growth),
+                        sentiment=VALUES(sentiment), event_type=VALUES(event_type),
+                        event_type_tags_json=VALUES(event_type_tags_json),
+                        reason_growth=VALUES(reason_growth),
                         reason_decrease=VALUES(reason_decrease)""",
                     (
                         art["id"],
@@ -198,6 +257,8 @@ def process_batch_group(
                         relevance,
                         item.get("e", ""),
                         sentiment,
+                        event_types[0],
+                        event_types_to_json(event_types),
                         item.get("u", ""),
                         item.get("d", ""),
                     ),

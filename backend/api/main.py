@@ -2,7 +2,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import settings
-from backend.database import check_db_connection
+from backend.database import (
+    check_db_connection,
+    ensure_layer1_event_columns,
+    ensure_market_index_table,
+    ensure_news_aligned_attribution_columns,
+    ensure_ohlc_a_share_columns,
+    ensure_ticker_alias_table,
+)
 from backend.api.routers import stocks, news, analysis, predict, pipeline
 
 app = FastAPI(title="PokieTicker", version="1.0.0")
@@ -28,6 +35,11 @@ def startup():
     if errors:
         raise RuntimeError("Startup configuration invalid:\n- " + "\n- ".join(errors))
     check_db_connection()
+    ensure_market_index_table()
+    ensure_ohlc_a_share_columns()
+    ensure_layer1_event_columns()
+    ensure_ticker_alias_table()
+    ensure_news_aligned_attribution_columns()
 
 
 @app.get("/api/health")

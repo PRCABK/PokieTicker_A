@@ -13,6 +13,8 @@ interface NewsItem {
   relevance: string | null;
   key_discussion: string | null;
   sentiment: string | null;
+  event_type?: string | null;
+  event_types?: string[];
   reason_growth: string | null;
   reason_decrease: string | null;
   ret_t0: number | null;
@@ -48,6 +50,19 @@ function pct(v: number | null) {
   const color = v > 0 ? '#ef5350' : v < 0 ? '#26a69a' : '#888';
   return <span style={{ color, fontWeight: 600 }}>{v > 0 ? '+' : ''}{v.toFixed(2)}%</span>;
 }
+
+const EVENT_TYPE_LABELS: Record<string, string> = {
+  earnings: '业绩',
+  policy: '政策',
+  order_contract: '订单',
+  product_tech: '产品/技术',
+  buyback_increase: '回购/增持',
+  reduction_unlock: '减持/解禁',
+  mna_restructuring: '并购/重组',
+  litigation_penalty: '诉讼/处罚',
+  management: '管理层',
+  other: '其他',
+};
 
 export default function NewsPanel({
   symbol,
@@ -162,6 +177,14 @@ export default function NewsPanel({
                   {item.title}
                 </a>
               </div>
+
+              {item.event_types && item.event_types.length > 0 && (
+                <div className="returns-chips" style={{ marginBottom: 8, gap: 6 }}>
+                  {item.event_types.slice(0, 3).map((eventType) => (
+                    <span key={eventType} className="ret-chip">{EVENT_TYPE_LABELS[eventType] ?? eventType}</span>
+                  ))}
+                </div>
+              )}
 
               {item.image_url && (
                 <div className="news-image-wrap">
